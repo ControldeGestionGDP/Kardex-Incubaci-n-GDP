@@ -5,7 +5,7 @@ import sqlite3
 import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="IncubaTrack ERP v4.5", page_icon="🥚", layout="wide")
+st.set_page_config(page_title="IncubaTrack ERP v4.6", page_icon="🥚", layout="wide")
 
 # --- SISTEMA DE BASE DE DATOS ---
 def init_db():
@@ -60,7 +60,7 @@ menu = ["🟢 Recepción", "🟡 Inventario Global", "📊 Seguimiento & Decisio
 choice = st.sidebar.radio("Ir a:", menu)
 
 # ---------------------------------------------------------
-# 🟢 1. RECEPCIÓN (NUEVO + EDITOR)
+# 🟢 1. RECEPCIÓN (CON EDICIÓN DE FECHAS)
 # ---------------------------------------------------------
 if choice == "🟢 Recepción":
     tab1, tab2 = st.tabs(["📥 Nuevo Ingreso", "✏️ Editar Lote Existente"])
@@ -104,26 +104,40 @@ if choice == "🟢 Recepción":
         id_edit = st.selectbox("Seleccione el Lote a Corregir:", ["Seleccionar..."] + lotes_lista['id_unico'].tolist())
         
         if id_edit != "Seleccionar...":
+            # Cargar datos actuales
             datos = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{id_edit}'", conn).iloc[0]
+            
+            # Convertir fechas de texto a objeto date para el input
+            f_p_val = datetime.strptime(datos['fecha_postura'], '%Y-%m-%d').date() if isinstance(datos['fecha_postura'], str) else datos['fecha_postura']
+            f_l_val = datetime.strptime(datos['fecha_llegada'], '%Y-%m-%d').date() if isinstance(datos['fecha_llegada'], str) else datos['fecha_llegada']
+
             with st.form("form_edicion"):
                 col_e1, col_e2 = st.columns(2)
                 e_granja = col_e1.text_input("Granja", value=datos['granja'])
                 e_planta = col_e2.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca"], index=0 if datos['planta']=="P.I. Tarapoto" else 1)
+                
+                # SECCIÓN DE FECHAS (RESTURADAS)
+                col_f1, col_f2 = st.columns(2)
+                e_f_postura = col_f1.date_input("Corregir Fecha Postura", value=f_p_val)
+                e_f_llegada = col_f2.date_input("Corregir Fecha Llegada", value=f_l_val)
+
                 ce1, ce2, ce3 = st.columns(3)
-                # Seleccionamos la genética actual
                 list_gen = ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]
                 idx_gen = list_gen.index(datos['linea_genetica']) if datos['linea_genetica'] in list_gen else 3
                 e_gen = ce1.selectbox("Genética", list_gen, index=idx_gen)
-                
                 e_edad = ce2.number_input("Edad Repro", value=int(datos['edad_repro']) if datos['edad_repro'] else 0)
                 e_saldo = ce3.number_input("Saldo Huevo", value=int(datos['saldo']))
+                
                 e_obs = st.text_area("Observaciones", value=datos['obs_sanitarias'])
                 
                 if st.form_submit_button("ACTUALIZAR DATOS"):
-                    c.execute('''UPDATE lotes SET granja=?, planta=?, linea_genetica=?, edad_repro=?, saldo=?, obs_sanitarias=? 
-                                 WHERE id_unico=?''', (e_granja, e_planta, e_gen, e_edad if e_edad > 0 else None, e_saldo, e_obs, id_edit))
+                    c.execute('''UPDATE lotes SET granja=?, planta=?, fecha_postura=?, fecha_llegada=?, 
+                                 linea_genetica=?, edad_repro=?, saldo=?, obs_sanitarias=? 
+                                 WHERE id_unico=?''', 
+                              (e_granja, e_planta, e_f_postura, e_f_llegada, e_gen, 
+                               e_edad if e_edad > 0 else None, e_saldo, e_obs, id_edit))
                     conn.commit()
-                    st.success("✅ Datos actualizados.")
+                    st.success("✅ Datos y Fechas actualizados.")
                     st.rerun()
 
 # ---------------------------------------------------------
@@ -184,7 +198,7 @@ elif choice == "🔵 Salidas (Incubación)":
                 st.rerun()
 
 # ---------------------------------------------------------
-# 🔍 5. FICHA DE TRAZABILIDAD (RESTURADA TOTAL)
+# 🔍 5. FICHA DE TRAZABILIDAD (HOJA DE VIDA COMPLETA)
 # ---------------------------------------------------------
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("🧐 Hoja de Vida del Lote")
@@ -196,14 +210,12 @@ elif choice == "🔍 Ficha de Trazabilidad":
         movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha, planta FROM historial WHERE id_lote='{target}' ORDER BY fecha DESC", conn)
         
         st.divider()
-        # Tarjetas de Métricas
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Saldo Actual", f"{info['saldo']} huevos")
         m2.metric("Cajas (360)", f"{round(info['saldo']/360, 2)}")
         m3.metric("Días Almacén", calcular_dias(info['fecha_postura']))
         m4.metric("Edad Repro", f"{int(info['edad_repro']) if pd.notnull(info['edad_repro']) else 'S/D'} sem")
         
-        # Bloques de Información Técnica (Vuelven todos los campos)
         col_t1, col_t2 = st.columns(2)
         with col_t1:
             st.subheader("📋 Datos Técnicos")
