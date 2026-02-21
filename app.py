@@ -68,14 +68,20 @@ if choice == "🟢 Recepción":
     st.header("📥 Registro de Lote")
     with st.form("form_ingreso", clear_on_submit=True):
         col1, col2 = st.columns(2)
-        lote_input = col1.text_input("Número o Código de Lote")
+        
+        # AQUÍ ESTÁ TU DETALLE REUPERADO: El parámetro 'help' con el signo de interrogación
+        lote_input = col1.text_input(
+            "Número o Código de Lote", 
+            help="Si escribes solo números = CDG. Si contiene 'SF' = San Fernando. Si contiene 'SE' = Santa Elena. Otros casos = Nombre tal cual."
+        )
+        
         planta = col2.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca"])
         
         c1, c2, c3 = st.columns(3)
         granja = c1.text_input("Granja")
         genetica = c2.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"])
         
-        # AJUSTE SEGURO: Edad de Repro opcional
+        # Edad de Repro opcional: 0 significa Sin Datos
         edad_repro = c3.number_input("Edad de Reproductora (Semanas) - Poner 0 si no hay dato", min_value=0, value=0)
         
         c4, c5, c6 = st.columns(3)
