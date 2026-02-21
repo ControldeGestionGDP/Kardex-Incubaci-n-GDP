@@ -5,7 +5,7 @@ import sqlite3
 import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="IncubaTrack ERP v4.3", page_icon="🥚", layout="wide")
+st.set_page_config(page_title="IncubaTrack ERP v4.4", page_icon="🥚", layout="wide")
 
 # --- SISTEMA DE BASE DE DATOS ---
 def init_db():
@@ -80,7 +80,7 @@ if choice == "🟢 Recepción":
         f_llegada = c6.date_input("Fecha de Llegada")
         
         transp = st.text_input("Transportista")
-        obs = st.text_area("Observaciones")
+        obs = st.text_area("Observaciones Sanitarias")
         
         if st.form_submit_button("REGISTRAR INGRESO"):
             id_u, proc = generar_id_y_procedencia(lote_input)
@@ -154,23 +154,49 @@ elif choice == "🔵 Salidas (Incubación)":
     else: st.warning("No hay huevos en stock.")
 
 # ---------------------------------------------------------
-# 🔍 5. FICHA DE TRAZABILIDAD
+# 🔍 5. FICHA DE TRAZABILIDAD (RESTURADA AL 100%)
 # ---------------------------------------------------------
 elif choice == "🔍 Ficha de Trazabilidad":
-    st.header("🧐 Detalle por Lote")
+    st.header("🧐 Hoja de Vida del Lote")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
-    target = st.selectbox("Lote:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
+    target = st.selectbox("Seleccione el Lote a Inspeccionar:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
+    
     if target != "Seleccionar...":
         info = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{target}'", conn).iloc[0]
-        movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha FROM historial WHERE id_lote='{target}'", conn)
-        st.metric("Saldo Actual", f"{info['saldo']} huevos ({round(info['saldo']/360,1)} cajas)")
-        st.write(f"**Procedencia:** {info['procedencia']} | **Transportista:** {info['transportista']}")
+        movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha, planta FROM historial WHERE id_lote='{target}' ORDER BY fecha DESC", conn)
+        
+        st.divider()
+        # Métricas Principales
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Saldo Actual", f"{info['saldo']} huevos")
+        m2.metric("Cajas (360)", f"{round(info['saldo']/360, 2)}")
+        m3.metric("Días Almacén", calcular_dias(info['fecha_postura']))
+        m4.metric("Edad Repro", f"{int(info['edad_repro']) if pd.notnull(info['edad_repro']) else 'S/D'} sem")
+        
+        # Información Técnica Completa
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            st.subheader("📋 Datos Técnicos")
+            st.write(f"**Planta:** {info['planta']}")
+            st.write(f"**Procedencia:** {info['procedencia']}")
+            st.write(f"**Granja:** {info['granja']}")
+            st.write(f"**Línea Genética:** {info['linea_genetica']}")
+        
+        with col_t2:
+            st.subheader("🚚 Datos de Entrega")
+            st.write(f"**Transportista:** {info['transportista']}")
+            st.write(f"**Fecha Postura:** {info['fecha_postura']}")
+            st.write(f"**Fecha Llegada:** {info['fecha_llegada']}")
+            st.info(f"**Observaciones:** {info['obs_sanitarias']}")
+        
+        st.divider()
+        st.subheader("📜 Historial de Movimientos de este Lote")
         st.dataframe(movs, use_container_width=True)
 
 # ---------------------------------------------------------
 # 📜 6. HISTORIAL GENERAL
 # ---------------------------------------------------------
 elif choice == "📜 Historial General":
-    st.header("📋 Movimientos de Planta")
+    st.header("📋 Movimientos Globales de Planta")
     h_df = pd.read_sql_query("SELECT id_lote, planta, tipo, cantidad, motivo, fecha FROM historial ORDER BY fecha DESC", conn)
     st.dataframe(h_df, use_container_width=True)
