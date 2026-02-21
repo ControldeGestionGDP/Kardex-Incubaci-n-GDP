@@ -5,7 +5,7 @@ import sqlite3
 import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="IncubaTrack ERP v4.2", page_icon="🥚", layout="wide")
+st.set_page_config(page_title="IncubaTrack ERP v4.3", page_icon="🥚", layout="wide")
 
 # --- SISTEMA DE BASE DE DATOS ---
 def init_db():
@@ -29,7 +29,6 @@ c = conn.cursor()
 def generar_id_y_procedencia(lote_txt):
     lote_txt = lote_txt.upper().strip()
     fecha_hoy = datetime.now().strftime("%d%m%y")
-    
     if lote_txt.isdigit():
         procedencia = "CDG"
         id_gen = f"CDG-{lote_txt}-{fecha_hoy}"
@@ -42,7 +41,6 @@ def generar_id_y_procedencia(lote_txt):
     else:
         procedencia = "Otros"
         id_gen = f"{lote_txt}-{fecha_hoy}"
-    
     return id_gen, procedencia
 
 def calcular_dias(f_postura):
@@ -58,7 +56,7 @@ def to_excel(df):
 
 # --- INTERFAZ ---
 st.sidebar.title("🛠️ Panel de Control")
-menu = ["🟢 Recepción", "🟡 Inventario Global", "📊 Seguimiento & Decisiones", "🔍 Trazabilidad por Lote", "📜 Historial General"]
+menu = ["🟢 Recepción", "🟡 Inventario Global", "📊 Seguimiento & Decisiones", "🔵 Salidas (Incubación)", "🔍 Ficha de Trazabilidad", "📜 Historial General"]
 choice = st.sidebar.radio("Ir a:", menu)
 
 # ---------------------------------------------------------
@@ -68,26 +66,18 @@ if choice == "🟢 Recepción":
     st.header("📥 Registro de Lote")
     with st.form("form_ingreso", clear_on_submit=True):
         col1, col2 = st.columns(2)
-        
-        # AQUÍ ESTÁ TU DETALLE REUPERADO: El parámetro 'help' con el signo de interrogación
-        lote_input = col1.text_input(
-            "Número o Código de Lote", 
-            help="Si escribes solo números = CDG. Si contiene 'SF' = San Fernando. Si contiene 'SE' = Santa Elena. Otros casos = Nombre tal cual."
-        )
-        
+        lote_input = col1.text_input("Número o Código de Lote", help="Solo números = CDG | SF = San Fernando | SE = Santa Elena")
         planta = col2.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca"])
         
         c1, c2, c3 = st.columns(3)
         granja = c1.text_input("Granja")
         genetica = c2.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"])
-        
-        # Edad de Repro opcional: 0 significa Sin Datos
-        edad_repro = c3.number_input("Edad de Reproductora (Semanas) - Poner 0 si no hay dato", min_value=0, value=0)
+        edad_repro = c3.number_input("Edad de Reproductora (Sem) - 0 = Sin Dato", min_value=0, value=0)
         
         c4, c5, c6 = st.columns(3)
         cant_h = c4.number_input("Cantidad de Huevos", min_value=0)
         f_postura = c5.date_input("Fecha de Postura")
-        f_llegada = c6.date_input("Fecha de Llegada a Planta")
+        f_llegada = c6.date_input("Fecha de Llegada")
         
         transp = st.text_input("Transportista")
         obs = st.text_area("Observaciones")
@@ -97,15 +87,13 @@ if choice == "🟢 Recepción":
             val_edad = edad_repro if edad_repro > 0 else None
             try:
                 c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                          (id_u, lote_input, proc, planta, granja, genetica, val_edad, 
-                           f_postura, f_llegada, cant_h, cant_h, transp, obs))
+                          (id_u, lote_input, proc, planta, granja, genetica, val_edad, f_postura, f_llegada, cant_h, cant_h, transp, obs))
                 c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)",
                           (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
                 conn.commit()
-                st.success(f"✅ Lote {id_u} registrado exitosamente ({proc})")
+                st.success(f"✅ Lote {id_u} registrado exitosamente")
                 st.balloons()
-            except Exception as e:
-                st.error(f"Error: El lote ya fue registrado hoy.")
+            except: st.error("Error: El lote ya fue registrado hoy.")
 
 # ---------------------------------------------------------
 # 🟡 2. INVENTARIO GLOBAL
@@ -113,24 +101,17 @@ if choice == "🟢 Recepción":
 elif choice == "🟡 Inventario Global":
     st.header("📦 Stock en Cámara Fría")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
-    
     if not df.empty:
         col_f1, col_f2 = st.columns(2)
-        f_proc = col_f1.multiselect("Filtrar Procedencia:", df['procedencia'].unique(), default=df['procedencia'].unique())
-        f_planta = col_f2.multiselect("Filtrar Planta:", df['planta'].unique(), default=df['planta'].unique())
-        
+        f_proc = col_f1.multiselect("Procedencia:", df['procedencia'].unique(), default=df['procedencia'].unique())
+        f_planta = col_f2.multiselect("Planta:", df['planta'].unique(), default=df['planta'].unique())
         df = df[(df['procedencia'].isin(f_proc)) & (df['planta'].isin(f_planta))]
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         df['Cajas (360)'] = (df['saldo'] / 360).round(2)
-        
-        # Formatear edad de repro para la vista (Si es nulo pone S/D)
         df['edad_repro'] = df['edad_repro'].apply(lambda x: int(x) if pd.notnull(x) else "S/D")
-        
-        cols_mostrar = ['id_unico', 'planta', 'procedencia', 'lote_nro', 'saldo', 'Cajas (360)', 'Días Almacén', 'edad_repro', 'fecha_postura', 'transportista']
-        st.dataframe(df[cols_mostrar], use_container_width=True)
+        st.dataframe(df[['id_unico', 'planta', 'procedencia', 'lote_nro', 'saldo', 'Cajas (360)', 'Días Almacén', 'edad_repro', 'fecha_postura']], use_container_width=True)
         st.download_button("📊 Exportar Excel", to_excel(df), "Inventario_Actual.xlsx")
-    else:
-        st.info("No hay stock disponible.")
+    else: st.info("No hay stock disponible.")
 
 # ---------------------------------------------------------
 # 📊 3. SEGUIMIENTO & DECISIONES
@@ -138,51 +119,56 @@ elif choice == "🟡 Inventario Global":
 elif choice == "📊 Seguimiento & Decisiones":
     st.header("🔬 Análisis de Prioridad")
     df_d = pd.read_sql_query("SELECT id_unico, planta, edad_repro, fecha_postura, saldo FROM lotes WHERE saldo > 0", conn)
-    
     if not df_d.empty:
         df_d['Días Almacén'] = df_d['fecha_postura'].apply(calcular_dias)
         df_d['Cajas'] = (df_d['saldo'] / 360).round(1)
-        
         def semaforo(row):
             if row['Días Almacén'] > 10: return "🔴 CRÍTICO"
             if pd.notnull(row['edad_repro']) and row['edad_repro'] > 60: return "🟠 REPRO VIEJA"
             if row['Días Almacén'] > 7: return "🟡 PRIORITARIO"
             return "🟢 ÓPTIMO"
-        
         df_d['Estado'] = df_d.apply(semaforo, axis=1)
-        df_d['edad_repro'] = df_d['edad_repro'].apply(lambda x: int(x) if pd.notnull(x) else "S/D")
-        
-        st.subheader("Tabla de Decisión Dinámica")
         st.dataframe(df_d[['id_unico', 'planta', 'Días Almacén', 'edad_repro', 'Cajas', 'Estado']].sort_values(by=['Días Almacén'], ascending=False), use_container_width=True)
-    else:
-        st.info("No hay datos para analizar.")
 
 # ---------------------------------------------------------
-# 🔍 4. TRAZABILIDAD POR LOTE
+# 🔵 4. SALIDAS (INCUBACIÓN)
 # ---------------------------------------------------------
-elif choice == "🔍 Trazabilidad por Lote":
-    st.header("🧐 Ficha Técnica e Historial")
+elif choice == "🔵 Salidas (Incubación)":
+    st.header("📤 Registrar Salida de Huevo")
+    lotes_activos = pd.read_sql_query("SELECT id_unico, saldo, planta FROM lotes WHERE saldo > 0", conn)
+    if not lotes_activos.empty:
+        with st.form("form_salida"):
+            col_s1, col_s2 = st.columns(2)
+            id_salida = col_s1.selectbox("Seleccione el Lote", lotes_activos['id_unico'])
+            saldo_actual = lotes_activos[lotes_activos['id_unico'] == id_salida]['saldo'].values[0]
+            planta_lote = lotes_activos[lotes_activos['id_unico'] == id_salida]['planta'].values[0]
+            cant_salida = col_s2.number_input(f"Cantidad a Salir (Máx: {saldo_actual})", min_value=1, max_value=int(saldo_actual), value=int(saldo_actual))
+            motivo_salida = st.selectbox("Motivo de Salida", ["Carga a Incubadora", "Venta de Huevo", "Merma/Rotura", "Ajuste"])
+            if st.form_submit_button("PROCESAR SALIDA"):
+                c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant_salida, id_salida))
+                c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)",
+                          (id_salida, planta_lote, "SALIDA", cant_salida, motivo_salida, datetime.now()))
+                conn.commit()
+                st.success("✅ Salida registrada")
+                st.rerun()
+    else: st.warning("No hay huevos en stock.")
+
+# ---------------------------------------------------------
+# 🔍 5. FICHA DE TRAZABILIDAD
+# ---------------------------------------------------------
+elif choice == "🔍 Ficha de Trazabilidad":
+    st.header("🧐 Detalle por Lote")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
-    target = st.selectbox("Busque el Lote:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
-    
+    target = st.selectbox("Lote:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
     if target != "Seleccionar...":
         info = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{target}'", conn).iloc[0]
-        movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha, planta FROM historial WHERE id_lote='{target}'", conn)
-        
-        st.divider()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Saldo Actual", f"{info['saldo']} huevos")
-        c2.metric("Equivalente Cajas", f"{round(info['saldo']/360, 2)}")
-        c3.metric("Edad Repro", f"{int(info['edad_repro']) if pd.notnull(info['edad_repro']) else 'Sin Datos'}")
-        
-        st.write(f"**Procedencia:** {info['procedencia']} | **Granja:** {info['granja']} | **Días Almacén:** {calcular_dias(info['fecha_postura'])}")
-        st.info(f"**Observaciones:** {info['obs_sanitarias']}")
-        
-        st.subheader("Movimientos")
+        movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha FROM historial WHERE id_lote='{target}'", conn)
+        st.metric("Saldo Actual", f"{info['saldo']} huevos ({round(info['saldo']/360,1)} cajas)")
+        st.write(f"**Procedencia:** {info['procedencia']} | **Transportista:** {info['transportista']}")
         st.dataframe(movs, use_container_width=True)
 
 # ---------------------------------------------------------
-# 📜 5. HISTORIAL GENERAL
+# 📜 6. HISTORIAL GENERAL
 # ---------------------------------------------------------
 elif choice == "📜 Historial General":
     st.header("📋 Movimientos de Planta")
