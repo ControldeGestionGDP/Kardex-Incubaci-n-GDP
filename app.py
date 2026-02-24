@@ -164,33 +164,40 @@ if choice == "🟢 Recepción":
                     st.toast("Datos actualizados con éxito", icon="🔄")
                     st.info(f"Lote {id_edit} ha sido modificado."); time.sleep(1.5); st.rerun()
 
-# --- 🟡 INVENTARIO GLOBAL ---
+# --- 🟡 INVENTARIO GLOBAL (CON BUSCADORES) ---
 elif choice == "🟡 Inventario Global":
     st.header("📦 Consolidado de Stock")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
+        # Fila de Buscadores añadida
         b1, b2, b3 = st.columns(3)
         search_lote = b1.text_input("🔍 Buscar por Nro Lote:")
         filter_planta = b2.multiselect("Filtrar Planta:", df['planta'].unique(), default=df['planta'].unique())
         filter_proc = b3.multiselect("Filtrar Procedencia:", df['procedencia'].unique(), default=df['procedencia'].unique())
-        if search_lote: df = df[df['lote_nro'].str.contains(search_lote, case=False)]
+        
+        if search_lote:
+            df = df[df['lote_nro'].str.contains(search_lote, case=False)]
         df = df[df['planta'].isin(filter_planta) & df['procedencia'].isin(filter_proc)]
 
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         cols = ['id_unico', 'saldo', 'Días Almacén', 'planta', 'procedencia', 'granja', 'linea_genetica', 'edad_repro', 'fecha_postura', 'fecha_llegada', 'obs_sanitarias']
         st.dataframe(df[cols], use_container_width=True)
-        st.download_button("📥 DESCARGAR EXCEL", to_excel(df), "Inventario.xlsx")
+        # EL BOTÓN DE DESCARGA Y EL TOAST SIGUEN AQUÍ
+        if st.download_button("📥 DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario_Filtrado.xlsx"):
+            st.toast("Descarga iniciada", icon="📊")
 
-# --- 📊 SEGUIMIENTO & DECISIONES (ACTUALIZADO: BUSCADOR DE LOTE) ---
+# --- 📊 SEGUIMIENTO & DECISIONES (CON BUSCADOR DE LOTE/ID) ---
 elif choice == "📊 Seguimiento & Decisiones":
     st.header("🔬 Prioridades de Carga")
     df = pd.read_sql_query("SELECT id_unico, lote_nro, planta, granja, linea_genetica, edad_repro, fecha_postura, saldo FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
+        # Fila de Filtros (Buscador Lote/ID solicitado)
         s1, s2 = st.columns(2)
-        h_search = s1.text_input("🔍 Buscar Lote o ID:") # BUSCADOR SOLICITADO
+        search_seg = s1.text_input("🔍 Buscar Lote o ID:")
         f_planta = s2.multiselect("Filtrar Planta:", df['planta'].unique(), default=df['planta'].unique())
         
-        if h_search: df = df[df['id_unico'].str.contains(h_search, case=False) | df['lote_nro'].str.contains(h_search, case=False)]
+        if search_seg:
+            df = df[df['id_unico'].str.contains(search_seg, case=False) | df['lote_nro'].str.contains(search_seg, case=False)]
         df = df[df['planta'].isin(f_planta)]
 
         df['Días'] = df['fecha_postura'].apply(calcular_dias)
@@ -216,42 +223,63 @@ elif choice == "🔵 Salidas (Incubación)":
                 if cant <= lote_info['saldo']:
                     c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant, id_s))
                     c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, lote_info['planta'], "SALIDA", cant, mot, datetime.now()))
-                    conn.commit(); st.toast("Salida registrada", icon="📤"); st.rerun()
+                    conn.commit()
+                    st.toast(f"Salida registrada: {id_s}", icon="📤")
+                    st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados."); st.balloons(); time.sleep(1.5); st.rerun()
+                else: st.error("Saldo insuficiente.")
 
-# --- 🔍 5. FICHA DE TRAZABILIDAD (INTACTA - 8 CUADROS) ---
+# --- 🔍 5. FICHA DE TRAZABILIDAD (INTACTA CON SUS 8 CUADROS) ---
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("🔎 Expediente de Lote (Hoja de Vida)")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
     target = st.selectbox("Buscar Lote:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
+    
     if target != "Seleccionar...":
         info = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{target}'", conn).iloc[0]
         movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha FROM historial WHERE id_lote='{target}' ORDER BY fecha DESC", conn)
+        
         st.subheader("📊 Estado en Tiempo Real")
         m1, m2, m3, m4 = st.columns(4)
         with m1: st.markdown(f'<div class="info-card"><div class="info-label">Saldo en Cámara</div><div class="info-value">{info["saldo"]} Huevos</div></div>', unsafe_allow_html=True)
         with m2: st.markdown(f'<div class="info-card"><div class="info-label">Equivalencia</div><div class="info-value">{round(info["saldo"]/360, 1)} Cajas</div></div>', unsafe_allow_html=True)
         with m3: st.markdown(f'<div class="info-card"><div class="info-label">Días de Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])} Días</div></div>', unsafe_allow_html=True)
         with m4: st.markdown(f'<div class="info-card"><div class="info-label">Edad Repro</div><div class="info-value">{info["edad_repro"] if info["edad_repro"] else "S/D"} Sem.</div></div>', unsafe_allow_html=True)
+
         st.subheader("📋 Datos Técnicos de Producción")
         c1, c2, c3, c4 = st.columns(4)
         with c1: st.markdown(f'<div class="info-card"><div class="info-label">Granja</div><div class="info-value">{info["granja"]}</div></div>', unsafe_allow_html=True)
         with c2: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
         with c3: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
         with c4: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
-        st.warning(f"📝 **Observaciones Sanitarias:** {info['obs_sanitarias']}")
-        st.divider(); st.subheader("📜 Movimientos Registrados"); st.dataframe(movs, use_container_width=True)
 
-# --- 📜 HISTORIAL GENERAL ---
+        st.warning(f"📝 **Observaciones Sanitarias:** {info['obs_sanitarias']}")
+        st.divider()
+        
+        col_t1, col_t2 = st.columns([3, 1])
+        col_t1.subheader("📜 Movimientos Registrados")
+        # EL BOTÓN DE DESCARGA Y NOTIFICACIÓN SIGUE AQUÍ
+        if col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx"):
+            st.toast(f"Reporte de {target} descargado", icon="📄")
+        st.dataframe(movs, use_container_width=True)
+
+# --- 📜 HISTORIAL GENERAL (CON FILTROS) ---
 elif choice == "📜 Historial General":
     st.header("📝 Auditoría de Movimientos")
     h_df = pd.read_sql_query("SELECT * FROM historial ORDER BY fecha DESC", conn)
     if not h_df.empty:
+        # Fila de Buscadores añadida
         h1, h2, h3 = st.columns(3)
         h_search = h1.text_input("🔍 Buscar Lote o ID:")
-        h_tipo = h2.multiselect("Tipo:", h_df['tipo'].unique(), default=h_df['tipo'].unique())
-        h_planta = h3.multiselect("Planta:", h_df['planta'].unique(), default=h_df['planta'].unique())
-        if h_search: h_df = h_df[h_df['id_lote'].str.contains(h_search, case=False)]
+        h_tipo = h2.multiselect("Filtrar Tipo:", h_df['tipo'].unique(), default=h_df['tipo'].unique())
+        h_planta = h3.multiselect("Filtrar Planta:", h_df['planta'].unique(), default=h_df['planta'].unique())
+        
+        if h_search:
+            h_df = h_df[h_df['id_lote'].str.contains(h_search, case=False)]
         h_df = h_df[h_df['tipo'].isin(h_tipo) & h_df['planta'].isin(h_planta)]
+
+        # EL BOTÓN DE DESCARGA Y NOTIFICACIÓN SIGUE AQUÍ
+        if st.download_button("📥 DESCARGAR AUDITORÍA FILTRADA", to_excel(h_df), "Auditoria.xlsx"):
+            st.toast("Auditoría exportada", icon="📜")
         st.dataframe(h_df, use_container_width=True)
 
 st.markdown('<div class="footer">Desarrollado por Gerencia de Control de Gestión</div>', unsafe_allow_html=True)
