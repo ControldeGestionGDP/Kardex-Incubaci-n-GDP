@@ -58,24 +58,38 @@ st.markdown(f"""
 def init_db():
     conn = sqlite3.connect('incubacion_ultra_v4.db', check_same_thread=False)
     c = conn.cursor()
+    # Definición exacta de 12 columnas
     c.execute('''CREATE TABLE IF NOT EXISTS lotes (
-                    id_unico TEXT PRIMARY KEY, lote_nro TEXT, procedencia TEXT, planta TEXT, 
-                    granja TEXT, linea_genetica TEXT, edad_repro INTEGER, 
-                    fecha_postura DATE, fecha_llegada DATE, cantidad_inicial INTEGER, 
-                    saldo INTEGER, obs_sanitarias TEXT)''')
+                    id_unico TEXT PRIMARY KEY, 
+                    lote_nro TEXT, 
+                    procedencia TEXT, 
+                    planta TEXT, 
+                    granja TEXT, 
+                    linea_genetica TEXT, 
+                    edad_repro INTEGER, 
+                    fecha_postura DATE, 
+                    fecha_llegada DATE, 
+                    cantidad_inicial INTEGER, 
+                    saldo INTEGER, 
+                    obs_sanitarias TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS historial (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, id_lote TEXT, planta TEXT,
-                    tipo TEXT, cantidad INTEGER, motivo TEXT, fecha TIMESTAMP)''')
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                    id_lote TEXT, 
+                    planta TEXT,
+                    tipo TEXT, 
+                    cantidad INTEGER, 
+                    motivo TEXT, 
+                    fecha TIMESTAMP)''')
     conn.commit()
     return conn
 
 conn = init_db()
 c = conn.cursor()
 
-# --- LÓGICA DE NEGOCIO (CORREGIDA PARA EVITAR DUPLICADOS) ---
+# --- LÓGICA DE NEGOCIO ---
 def generar_id_y_procedencia(lote_txt):
     lote_txt = lote_txt.upper().strip()
-    # Usamos segundos (%S) para que cada registro sea único aunque sea el mismo lote y día
+    # Agregamos HORA, MINUTO y SEGUNDO para permitir múltiples ingresos del mismo lote el mismo día
     timestamp = datetime.now().strftime("%d%m%y-%H%M%S")
     if lote_txt.isdigit():
         procedencia = "CDG"
@@ -133,8 +147,11 @@ if choice == "🟢 Recepción":
                 else:
                     id_u, proc = generar_id_y_procedencia(lote_input)
                     try:
-                        c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (id_u, lote_input, proc, planta, granja, genetica, (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, cant_h, cant_h, obs))
-                        c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
+                        # Insertando exactamente 12 valores para las 12 columnas
+                        c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", 
+                                 (id_u, lote_input, proc, planta, granja, genetica, (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, cant_h, cant_h, obs))
+                        c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", 
+                                 (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
                         conn.commit()
                         st.toast(f"Lote {id_u} registrado", icon="📥")
                         st.success(f"✅ Lote {id_u} guardado correctamente."); st.balloons(); time.sleep(1); st.rerun()
