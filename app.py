@@ -260,7 +260,7 @@ elif choice == "🔵 Salidas (Incubación)":
 
 # --- 🔍 5. FICHA DE TRAZABILIDAD ---
 elif choice == "🔍 Ficha de Trazabilidad":
-    st.header("🔎 Expediente de Lote (Hoja de Vida)")
+    st.header("Expediente de Lote")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
     target = st.selectbox("Buscar Lote:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
     
