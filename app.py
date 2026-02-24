@@ -163,10 +163,8 @@ elif choice == "🟡 Inventario Global":
         st.dataframe(df[cols], use_container_width=True)
         if st.download_button("📥 DESCARGAR EXCEL COMPLETO", to_excel(df), "Inventario_Completo.xlsx"):
             st.toast("Descarga iniciada", icon="📊")
-    else:
-        st.info("No hay stock disponible en cámara.")
 
-# --- 📊 SEGUIMIENTO & DECISIONES (COLOREADO) ---
+# --- 📊 SEGUIMIENTO & DECISIONES ---
 elif choice == "📊 Seguimiento & Decisiones":
     st.header("🔬 Prioridades de Carga")
     df = pd.read_sql_query("SELECT id_unico, planta, granja, linea_genetica, edad_repro, fecha_postura, saldo FROM lotes WHERE saldo > 0", conn)
@@ -196,27 +194,42 @@ elif choice == "🔵 Salidas (Incubación)":
                     c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, lote_info['planta'], "SALIDA", cant, mot, datetime.now()))
                     conn.commit()
                     st.toast(f"Salida registrada: {id_s}", icon="📤")
-                    st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados."); st.balloons(); time.sleep(2); st.rerun()
+                    st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados."); st.balloons(); time.sleep(1.5); st.rerun()
                 else: st.error("Saldo insuficiente.")
 
-# --- 🔍 5. FICHA DE TRAZABILIDAD ---
+# --- 🔍 5. FICHA DE TRAZABILIDAD (RESTAURADA COMPLETA) ---
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("🔎 Expediente de Lote (Hoja de Vida)")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
     target = st.selectbox("Buscar Lote:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
+    
     if target != "Seleccionar...":
         info = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{target}'", conn).iloc[0]
         movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha FROM historial WHERE id_lote='{target}' ORDER BY fecha DESC", conn)
-        # Mostrar Info Cards...
+        
+        # Bloque 1: Estado en Tiempo Real
         st.subheader("📊 Estado en Tiempo Real")
         m1, m2, m3, m4 = st.columns(4)
-        with m1: st.markdown(f'<div class="info-card"><div class="info-label">Saldo</div><div class="info-value">{info["saldo"]}</div></div>', unsafe_allow_html=True)
+        with m1: st.markdown(f'<div class="info-card"><div class="info-label">Saldo en Cámara</div><div class="info-value">{info["saldo"]} Huevos</div></div>', unsafe_allow_html=True)
         with m2: st.markdown(f'<div class="info-card"><div class="info-label">Equivalencia</div><div class="info-value">{round(info["saldo"]/360, 1)} Cajas</div></div>', unsafe_allow_html=True)
-        with m3: st.markdown(f'<div class="info-card"><div class="info-label">Días Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])}</div></div>', unsafe_allow_html=True)
-        with m4: st.markdown(f'<div class="info-card"><div class="info-label">Edad Repro</div><div class="info-value">{info["edad_repro"]} Sem.</div></div>', unsafe_allow_html=True)
+        with m3: st.markdown(f'<div class="info-card"><div class="info-label">Días de Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])} Días</div></div>', unsafe_allow_html=True)
+        with m4: st.markdown(f'<div class="info-card"><div class="info-label">Edad Repro</div><div class="info-value">{info["edad_repro"] if info["edad_repro"] else "S/D"} Sem.</div></div>', unsafe_allow_html=True)
+
+        # Bloque 2: Datos Técnicos
+        st.subheader("📋 Datos Técnicos de Producción")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.markdown(f'<div class="info-card"><div class="info-label">Granja</div><div class="info-value">{info["granja"]}</div></div>', unsafe_allow_html=True)
+        with c2: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
+        with c3: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
+        with c4: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
+
+        st.warning(f"📝 **Observaciones Sanitarias:** {info['obs_sanitarias']}")
+        st.divider()
         
-        if st.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx"):
-            st.toast(f"Expediente {target} exportado", icon="📄")
+        col_t1, col_t2 = st.columns([3, 1])
+        col_t1.subheader("📜 Movimientos Registrados")
+        if col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx"):
+            st.toast(f"Reporte de {target} descargado", icon="📄")
         st.dataframe(movs, use_container_width=True)
 
 # --- 📜 HISTORIAL GENERAL ---
@@ -225,7 +238,7 @@ elif choice == "📜 Historial General":
     h_df = pd.read_sql_query("SELECT * FROM historial ORDER BY fecha DESC", conn)
     if not h_df.empty:
         if st.download_button("📥 DESCARGAR AUDITORÍA", to_excel(h_df), "Auditoria.xlsx"):
-            st.toast("Reporte de auditoría generado", icon="📜")
+            st.toast("Auditoría exportada", icon="📜")
         st.dataframe(h_df, use_container_width=True)
 
 st.markdown('<div class="footer">Desarrollado por Gerencia de Control de Gestión</div>', unsafe_allow_html=True)
