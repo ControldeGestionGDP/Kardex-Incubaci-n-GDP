@@ -38,7 +38,6 @@ st.markdown(f"""
     [data-testid="stSidebar"] {{ background-color: #07456a; }}
     [data-testid="stSidebar"] * {{ color: white !important; }}
     
-    /* FOOTER CENTRADO */
     .footer {{ 
         position: fixed; 
         bottom: 10px; 
@@ -58,16 +57,32 @@ st.markdown(f"""
 # --- SISTEMA DE BASE DE DATOS ---
 @st.cache_resource
 def init_db():
-    conn = sqlite3.connect('incubacion_ultra_v4.db', check_same_thread=False)
+    # CAMBIAMOS EL NOMBRE A v5 PARA EVITAR EL ERROR DE COLUMNAS VIEJAS
+    conn = sqlite3.connect('incubacion_v5.db', check_same_thread=False)
     c = conn.cursor()
+    # 12 Columnas exactas
     c.execute('''CREATE TABLE IF NOT EXISTS lotes (
-                    id_unico TEXT PRIMARY KEY, lote_nro TEXT, procedencia TEXT, planta TEXT, 
-                    granja TEXT, linea_genetica TEXT, edad_repro INTEGER, 
-                    fecha_postura DATE, fecha_llegada DATE, cantidad_inicial INTEGER, 
-                    saldo INTEGER, obs_sanitarias TEXT)''')
+                    id_unico TEXT PRIMARY KEY, 
+                    lote_nro TEXT, 
+                    procedencia TEXT, 
+                    planta TEXT, 
+                    granja TEXT, 
+                    linea_genetica TEXT, 
+                    edad_repro INTEGER, 
+                    fecha_postura DATE, 
+                    fecha_llegada DATE, 
+                    cantidad_inicial INTEGER, 
+                    saldo INTEGER, 
+                    obs_sanitarias TEXT)''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS historial (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, id_lote TEXT, planta TEXT,
-                    tipo TEXT, cantidad INTEGER, motivo TEXT, fecha TIMESTAMP)''')
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                    id_lote TEXT, 
+                    planta TEXT,
+                    tipo TEXT, 
+                    cantidad INTEGER, 
+                    motivo TEXT, 
+                    fecha TIMESTAMP)''')
     conn.commit()
     return conn
 
@@ -121,13 +136,27 @@ if choice == "🟢 Recepción":
             c1, c2, c3 = st.columns(3); granja = c1.text_input("Granja"); genetica = c2.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]); edad_repro = c3.number_input("Edad Repro", min_value=0, value=0)
             c4, c5, c6 = st.columns(3); cant_h = c4.number_input("Cantidad", min_value=0); f_postura = c5.date_input("Fecha Postura"); f_llegada = c6.date_input("Fecha Llegada")
             obs = st.text_area("Notas Sanitarias")
+            
             if st.form_submit_button("💾 GUARDAR REGISTRO"):
-                id_u, proc = generar_id_y_procedencia(lote_input)
-                try:
-                    c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (id_u, lote_input.strip().upper(), proc, planta, granja, genetica, (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, cant_h, cant_h, obs))
-                    c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
-                    conn.commit(); st.success(f"✅ Lote {id_u} guardado"); st.balloons(); st.rerun()
-                except sqlite3.IntegrityError: st.error("❌ Error: El ID ya existe.")
+                if lote_input:
+                    id_u, proc = generar_id_y_procedencia(lote_input)
+                    try:
+                        # 12 SIGNOS DE INTERROGACIÓN EXACTOS
+                        c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", 
+                                  (id_u, lote_input.strip().upper(), proc, planta, granja, genetica, 
+                                   (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, 
+                                   cant_h, cant_h, obs))
+                        
+                        c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", 
+                                  (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
+                        conn.commit()
+                        st.success(f"✅ Lote {id_u} guardado")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("❌ Error: Este Lote ya fue registrado hoy.")
+                else:
+                    st.warning("Escribe un número de lote.")
+
     with t2:
         st.header("Editor de Lotes")
         lista = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
