@@ -7,7 +7,7 @@ import io
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="IncubaTrack ERP | Gestión Estratégica", page_icon="🥚", layout="wide")
 
-# --- ESTILOS CORPORATIVOS (#ed701b y #07456a) ---
+# --- ESTILOS CORPORATIVOS ---
 st.markdown(f"""
     <style>
     .main {{ background-color: #f8f9fa; }}
@@ -42,7 +42,8 @@ st.markdown(f"""
     </style>
     """, unsafe_allow_html=True)
 
-# --- SISTEMA DE BASE DE DATOS ---
+# --- SISTEMA DE BASE DE DATOS (MEJORA 1: CACHE DE CONEXIÓN) ---
+@st.cache_resource
 def init_db():
     conn = sqlite3.connect('incubacion_ultra_v4.db', check_same_thread=False)
     c = conn.cursor()
@@ -62,7 +63,7 @@ c = conn.cursor()
 
 # --- LÓGICA DE NEGOCIO ---
 def generar_id_y_procedencia(lote_txt):
-    lote_txt = lote_txt.upper().strip()
+    lote_txt = lote_txt.upper().strip() # MEJORA 2: LIMPIEZA DE TEXTO
     fecha_hoy = datetime.now().strftime("%d%m%y")
     if lote_txt.isdigit():
         procedencia = "CDG"
@@ -110,10 +111,10 @@ if choice == "🟢 Recepción":
             if st.form_submit_button("💾 GUARDAR REGISTRO"):
                 id_u, proc = generar_id_y_procedencia(lote_input)
                 try:
-                    c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (id_u, lote_input, proc, planta, granja, genetica, (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, cant_h, cant_h, transp, obs))
+                    c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (id_u, lote_input.strip().upper(), proc, planta, granja, genetica, (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, cant_h, cant_h, transp, obs))
                     c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
                     conn.commit(); st.success(f"✅ Lote {id_u} guardado"); st.balloons(); st.rerun()
-                except: st.error("❌ Error: ID duplicado.")
+                except sqlite3.IntegrityError: st.error("❌ Error: El ID ya existe. Verifica si ya ingresaste este lote hoy.")
     with t2:
         st.header("Editor de Lotes")
         lista = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
@@ -129,7 +130,7 @@ if choice == "🟢 Recepción":
                     c.execute("UPDATE lotes SET granja=?, planta=?, fecha_postura=?, fecha_llegada=?, linea_genetica=?, edad_repro=?, saldo=?, obs_sanitarias=? WHERE id_unico=?", (e_granja, e_planta, e_f_postura, e_f_llegada, e_gen, e_edad, e_saldo, e_obs, id_edit))
                     conn.commit(); st.toast("Actualizado", icon="✅"); st.rerun()
 
-# --- 🔍 5. FICHA DE TRAZABILIDAD (CON BOTÓN EXCEL) ---
+# --- 🔍 5. FICHA DE TRAZABILIDAD ---
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("🔎 Expediente de Lote (Hoja de Vida)")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
@@ -168,13 +169,18 @@ elif choice == "🔍 Ficha de Trazabilidad":
         col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx")
         st.dataframe(movs, use_container_width=True)
 
-# --- 🟡 INVENTARIO GLOBAL ---
+# --- 🟡 INVENTARIO GLOBAL (MEJORA 3: SEMÁFORO DE DÍAS) ---
 elif choice == "🟡 Inventario Global":
     st.header("📦 Consolidado de Stock")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
-        st.dataframe(df[['id_unico', 'planta', 'procedencia', 'saldo', 'Días Almacén']], use_container_width=True)
+        
+        # Estilo para alertar lotes viejos
+        def style_dias(v):
+            return 'color: red; font-weight: bold' if v > 7 else 'color: green'
+            
+        st.dataframe(df[['id_unico', 'planta', 'procedencia', 'saldo', 'Días Almacén']].style.applymap(style_dias, subset=['Días Almacén']), use_container_width=True)
         st.download_button("📥 DESCARGAR EXCEL", to_excel(df), "Stock.xlsx")
 
 # --- 📊 SEGUIMIENTO ---
@@ -185,21 +191,25 @@ elif choice == "📊 Seguimiento & Decisiones":
         df['Días'] = df['fecha_postura'].apply(calcular_dias)
         st.table(df.sort_values(by="Días", ascending=False))
 
-# --- 🔵 SALIDAS ---
+# --- 🔵 SALIDAS (MEJORA 4: VALIDACIÓN DE STOCK) ---
 elif choice == "🔵 Salidas (Incubación)":
     st.header("📤 Orden de Salida")
     lotes = pd.read_sql_query("SELECT id_unico, saldo FROM lotes WHERE saldo > 0", conn)
     if not lotes.empty:
         with st.form("f_sal"):
             id_s = st.selectbox("Lote", lotes['id_unico'])
-            cant = st.number_input("Cantidad", min_value=1)
+            # Buscamos el saldo real del lote seleccionado
+            saldo_actual = int(lotes[lotes['id_unico'] == id_s]['saldo'].values[0])
+            cant = st.number_input(f"Cantidad (Máximo disponible: {saldo_actual})", min_value=1, max_value=saldo_actual)
             mot = st.selectbox("Destino", ["Carga Incubadora", "Venta", "Merma"])
             if st.form_submit_button("🚀 PROCESAR"):
                 c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant, id_s))
                 c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, "PLANTA", "SALIDA", cant, mot, datetime.now()))
-                conn.commit(); st.success("Salida registrada"); st.rerun()
+                conn.commit(); st.success("Salida registrada con éxito"); st.rerun()
+    else:
+        st.info("No hay huevos en stock para procesar salidas.")
 
-# --- 📜 HISTORIAL GENERAL (CON BOTÓN EXCEL) ---
+# --- 📜 HISTORIAL GENERAL ---
 elif choice == "📜 Historial General":
     st.header("📝 Auditoría de Movimientos")
     h_df = pd.read_sql_query("SELECT * FROM historial ORDER BY fecha DESC", conn)
