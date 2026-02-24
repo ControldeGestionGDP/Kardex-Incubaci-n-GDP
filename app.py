@@ -51,8 +51,31 @@ st.markdown(f"""
     }}
     
     .sidebar-logo {{ font-size: 50px; text-align: center; margin-bottom: -10px; }}
+
+    /* Animación de pollitos */
+    @keyframes falling {{
+        0% {{ transform: translateY(-100vh) rotate(0deg); }}
+        100% {{ transform: translateY(100vh) rotate(360deg); }}
+    }}
+    .pollito-anim {{
+        position: fixed;
+        top: -10%;
+        font-size: 2rem;
+        z-index: 9999;
+        animation: falling 3s linear infinite;
+    }}
     </style>
     """, unsafe_allow_html=True)
+
+# --- FUNCIÓN PARA EFECTO DE POLLITOS ---
+def animacion_pollitos():
+    """Genera una lluvia visual de pollitos en la pantalla"""
+    pollitos_html = ""
+    for i in range(15):
+        left = i * 7
+        delay = i * 0.2
+        pollitos_html += f'<div class="pollito-anim" style="left:{left}%; animation-delay:{delay}s;">🐣</div>'
+    st.markdown(pollitos_html, unsafe_allow_html=True)
 
 # --- SISTEMA DE BASE DE DATOS ---
 def init_db():
@@ -143,8 +166,13 @@ if choice == "🟢 Recepción":
                         c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", 
                                  (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
                         conn.commit()
-                        st.toast(f"Lote {id_u} registrado", icon="📥")
-                        st.success(f"✅ Lote {id_u} guardado correctamente."); st.balloons(); time.sleep(1); st.rerun()
+                        
+                        # --- MODIFICACIÓN: LLUVIA DE POLLITOS ---
+                        animacion_pollitos()
+                        st.toast(f"Lote {id_u} registrado", icon="🐣")
+                        st.success(f"✅ Lote {id_u} guardado correctamente.")
+                        time.sleep(2) 
+                        st.rerun()
                     except Exception as e: 
                         st.error(f"❌ Error al guardar: {e}")
     with t2:
@@ -164,12 +192,11 @@ if choice == "🟢 Recepción":
                     st.toast("Datos actualizados con éxito", icon="🔄")
                     st.info(f"Lote {id_edit} ha sido modificado."); time.sleep(1.5); st.rerun()
 
-# --- 🟡 INVENTARIO GLOBAL (CON BUSCADORES) ---
+# --- 🟡 INVENTARIO GLOBAL ---
 elif choice == "🟡 Inventario Global":
     st.header("📦 Consolidado de Stock")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
-        # Fila de Buscadores añadida
         b1, b2, b3 = st.columns(3)
         search_lote = b1.text_input("🔍 Buscar por Nro Lote:")
         filter_planta = b2.multiselect("Filtrar Planta:", df['planta'].unique(), default=df['planta'].unique())
@@ -182,16 +209,14 @@ elif choice == "🟡 Inventario Global":
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         cols = ['id_unico', 'saldo', 'Días Almacén', 'planta', 'procedencia', 'granja', 'linea_genetica', 'edad_repro', 'fecha_postura', 'fecha_llegada', 'obs_sanitarias']
         st.dataframe(df[cols], use_container_width=True)
-        # EL BOTÓN DE DESCARGA Y EL TOAST SIGUEN AQUÍ
         if st.download_button("📥 DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario_Filtrado.xlsx"):
             st.toast("Descarga iniciada", icon="📊")
 
-# --- 📊 SEGUIMIENTO & DECISIONES (CON BUSCADOR DE LOTE/ID) ---
+# --- 📊 SEGUIMIENTO & DECISIONES ---
 elif choice == "📊 Seguimiento & Decisiones":
     st.header("🔬 Prioridades de Carga")
     df = pd.read_sql_query("SELECT id_unico, lote_nro, planta, granja, linea_genetica, edad_repro, fecha_postura, saldo FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
-        # Fila de Filtros (Buscador Lote/ID solicitado)
         s1, s2 = st.columns(2)
         search_seg = s1.text_input("🔍 Buscar Lote o ID:")
         f_planta = s2.multiselect("Filtrar Planta:", df['planta'].unique(), default=df['planta'].unique())
@@ -224,11 +249,16 @@ elif choice == "🔵 Salidas (Incubación)":
                     c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant, id_s))
                     c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, lote_info['planta'], "SALIDA", cant, mot, datetime.now()))
                     conn.commit()
+                    
+                    # --- MODIFICACIÓN: LLUVIA DE POLLITOS ---
+                    animacion_pollitos()
                     st.toast(f"Salida registrada: {id_s}", icon="📤")
-                    st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados."); st.balloons(); time.sleep(1.5); st.rerun()
+                    st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados."); 
+                    time.sleep(2)
+                    st.rerun()
                 else: st.error("Saldo insuficiente.")
 
-# --- 🔍 5. FICHA DE TRAZABILIDAD (INTACTA CON SUS 8 CUADROS) ---
+# --- 🔍 5. FICHA DE TRAZABILIDAD ---
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("🔎 Expediente de Lote (Hoja de Vida)")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
@@ -257,17 +287,15 @@ elif choice == "🔍 Ficha de Trazabilidad":
         
         col_t1, col_t2 = st.columns([3, 1])
         col_t1.subheader("📜 Movimientos Registrados")
-        # EL BOTÓN DE DESCARGA Y NOTIFICACIÓN SIGUE AQUÍ
         if col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx"):
             st.toast(f"Reporte de {target} descargado", icon="📄")
         st.dataframe(movs, use_container_width=True)
 
-# --- 📜 HISTORIAL GENERAL (CON FILTROS) ---
+# --- 📜 HISTORIAL GENERAL ---
 elif choice == "📜 Historial General":
     st.header("📝 Auditoría de Movimientos")
     h_df = pd.read_sql_query("SELECT * FROM historial ORDER BY fecha DESC", conn)
     if not h_df.empty:
-        # Fila de Buscadores añadida
         h1, h2, h3 = st.columns(3)
         h_search = h1.text_input("🔍 Buscar Lote o ID:")
         h_tipo = h2.multiselect("Filtrar Tipo:", h_df['tipo'].unique(), default=h_df['tipo'].unique())
@@ -277,7 +305,6 @@ elif choice == "📜 Historial General":
             h_df = h_df[h_df['id_lote'].str.contains(h_search, case=False)]
         h_df = h_df[h_df['tipo'].isin(h_tipo) & h_df['planta'].isin(h_planta)]
 
-        # EL BOTÓN DE DESCARGA Y NOTIFICACIÓN SIGUE AQUÍ
         if st.download_button("📥 DESCARGAR AUDITORÍA FILTRADA", to_excel(h_df), "Auditoria.xlsx"):
             st.toast("Auditoría exportada", icon="📜")
         st.dataframe(h_df, use_container_width=True)
