@@ -52,30 +52,36 @@ st.markdown(f"""
     
     .sidebar-logo {{ font-size: 50px; text-align: center; margin-bottom: -10px; }}
 
-    /* Animación de pollitos */
+    /* Animación de pollitos mejorada */
     @keyframes falling {{
-        0% {{ transform: translateY(-100vh) rotate(0deg); }}
-        100% {{ transform: translateY(100vh) rotate(360deg); }}
+        0% {{ transform: translateY(-10vh) translateX(0) rotate(0deg); opacity: 1; }}
+        100% {{ transform: translateY(100vh) translateX(20px) rotate(360deg); opacity: 0; }}
     }}
     .pollito-anim {{
         position: fixed;
-        top: -10%;
-        font-size: 2rem;
-        z-index: 9999;
-        animation: falling 3s linear infinite;
+        top: -5vh;
+        font-size: 2.5rem;
+        z-index: 999999;
+        pointer-events: none;
+        animation: falling 2s linear forwards;
     }}
     </style>
     """, unsafe_allow_html=True)
 
-# --- FUNCIÓN PARA EFECTO DE POLLITOS ---
-def animacion_pollitos():
-    """Genera una lluvia visual de pollitos en la pantalla"""
+# --- FUNCIÓN PARA LLUVIA DE POLLITOS ---
+def lluvia_de_pollitos():
+    """Crea una ráfaga masiva de pollitos"""
+    container = st.empty()
     pollitos_html = ""
-    for i in range(15):
-        left = i * 7
-        delay = i * 0.2
-        pollitos_html += f'<div class="pollito-anim" style="left:{left}%; animation-delay:{delay}s;">🐣</div>'
-    st.markdown(pollitos_html, unsafe_allow_html=True)
+    # Generamos 30 pollitos en posiciones y retrasos aleatorios
+    for i in range(30):
+        pos_x = (i * 3.3) # Distribución en el ancho
+        delay = (i % 5) * 0.2 # Escalonado para que no caigan todos al mismo tiempo
+        pollitos_html += f'<div class="pollito-anim" style="left:{pos_x}%; animation-delay:{delay}s;">🐣</div>'
+    
+    container.markdown(pollitos_html, unsafe_allow_html=True)
+    time.sleep(2.5) # Tiempo suficiente para que caigan antes del rerun
+    container.empty()
 
 # --- SISTEMA DE BASE DE DATOS ---
 def init_db():
@@ -166,12 +172,9 @@ if choice == "🟢 Recepción":
                         c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", 
                                  (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
                         conn.commit()
-                        
-                        # --- MODIFICACIÓN: LLUVIA DE POLLITOS ---
-                        animacion_pollitos()
                         st.toast(f"Lote {id_u} registrado", icon="🐣")
                         st.success(f"✅ Lote {id_u} guardado correctamente.")
-                        time.sleep(2) 
+                        lluvia_de_pollitos() # Ejecuta la ráfaga
                         st.rerun()
                     except Exception as e: 
                         st.error(f"❌ Error al guardar: {e}")
@@ -249,12 +252,9 @@ elif choice == "🔵 Salidas (Incubación)":
                     c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant, id_s))
                     c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, lote_info['planta'], "SALIDA", cant, mot, datetime.now()))
                     conn.commit()
-                    
-                    # --- MODIFICACIÓN: LLUVIA DE POLLITOS ---
-                    animacion_pollitos()
                     st.toast(f"Salida registrada: {id_s}", icon="📤")
-                    st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados."); 
-                    time.sleep(2)
+                    st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados.")
+                    lluvia_de_pollitos() # Ejecuta la ráfaga
                     st.rerun()
                 else: st.error("Saldo insuficiente.")
 
