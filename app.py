@@ -131,7 +131,8 @@ if choice == "🟢 Recepción":
                     c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (id_u, lote_input, proc, planta, granja, genetica, (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, cant_h, cant_h, obs))
                     c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
                     conn.commit(); st.success(f"✅ Lote {id_u} guardado"); st.balloons(); st.rerun()
-                except Exception as e: st.error(f"❌ Error al guardar: {e}")
+                except: st.error("❌ Error: ID duplicado.")
+
     with t2:
         st.header("Editor de Lotes")
         lista = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
@@ -147,18 +148,15 @@ if choice == "🟢 Recepción":
                     c.execute("UPDATE lotes SET granja=?, planta=?, fecha_postura=?, fecha_llegada=?, linea_genetica=?, edad_repro=?, saldo=?, obs_sanitarias=? WHERE id_unico=?", (e_granja, e_planta, e_f_postura, e_f_llegada, e_gen, e_edad, e_saldo, e_obs, id_edit))
                     conn.commit(); st.toast("Actualizado", icon="✅"); st.rerun()
 
-# --- 🟡 INVENTARIO GLOBAL (TODOS LOS CAMPOS) ---
+# --- 🟡 INVENTARIO GLOBAL ---
 elif choice == "🟡 Inventario Global":
     st.header("📦 Consolidado de Stock")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
-        # Reordenar para que los días de almacén sean visibles al inicio
         cols = ['id_unico', 'saldo', 'Días Almacén', 'planta', 'procedencia', 'granja', 'linea_genetica', 'edad_repro', 'fecha_postura', 'fecha_llegada', 'obs_sanitarias']
         st.dataframe(df[cols], use_container_width=True)
         st.download_button("📥 DESCARGAR EXCEL COMPLETO", to_excel(df), "Inventario_Completo.xlsx")
-    else:
-        st.info("No hay stock disponible en cámara.")
 
 # --- 📊 SEGUIMIENTO & DECISIONES (COLOREADO) ---
 elif choice == "📊 Seguimiento & Decisiones":
@@ -168,23 +166,11 @@ elif choice == "📊 Seguimiento & Decisiones":
         df['Días'] = df['fecha_postura'].apply(calcular_dias)
         df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
         df = df.sort_values(by="Días", ascending=False)
-
         def color_semaforo(row):
-            if row['Días'] > 10:
-                return ['background-color: #ffcccc'] * len(row)
-            elif 7 <= row['Días'] <= 9:
-                return ['background-color: #fff4cc'] * len(row)
-            else:
-                return ['background-color: #d4edda'] * len(row)
-
-        st.subheader("Tabla de Prioridades")
+            if row['Días'] > 10: return ['background-color: #ffcccc'] * len(row)
+            elif 7 <= row['Días'] <= 9: return ['background-color: #fff4cc'] * len(row)
+            else: return ['background-color: #d4edda'] * len(row)
         st.dataframe(df.style.apply(color_semaforo, axis=1), use_container_width=True)
-        st.markdown("""
-        **Leyenda de colores:**
-        - 🔴 **Rojo (>10 días):** Riesgo alto de viabilidad. Carga inmediata.
-        - 🟡 **Amarillo (7-9 días):** Zona óptima de carga según la empresa.
-        - 🟢 **Verde (<7 días):** Fresco.
-        """)
 
 # --- 🔵 SALIDAS (CON NOTIFICACIÓN) ---
 elif choice == "🔵 Salidas (Incubación)":
@@ -192,45 +178,55 @@ elif choice == "🔵 Salidas (Incubación)":
     lotes = pd.read_sql_query("SELECT id_unico, saldo, planta FROM lotes WHERE saldo > 0", conn)
     if not lotes.empty:
         with st.form("f_sal"):
-            id_s = st.selectbox("Seleccionar Lote en Stock", lotes['id_unico'])
-            cant = st.number_input("Cantidad a retirar", min_value=1)
-            mot = st.selectbox("Destino de la salida", ["Carga Incubadora", "Venta", "Merma"])
+            id_s = st.selectbox("Seleccionar Lote", lotes['id_unico'])
+            cant = st.number_input("Cantidad", min_value=1)
+            mot = st.selectbox("Destino", ["Carga Incubadora", "Venta", "Merma"])
             if st.form_submit_button("🚀 PROCESAR SALIDA"):
-                # Obtener la planta del lote para el historial
                 planta_actual = lotes[lotes['id_unico'] == id_s]['planta'].values[0]
-                # Validar stock
                 saldo_actual = lotes[lotes['id_unico'] == id_s]['saldo'].values[0]
                 if cant <= saldo_actual:
                     c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant, id_s))
                     c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, planta_actual, "SALIDA", cant, mot, datetime.now()))
                     conn.commit()
-                    st.success(f"📦 ¡Salida Exitosa! Se han retirado {cant} huevos del lote {id_s} para {mot}.")
-                    st.balloons()
-                else:
-                    st.error("❌ Cantidad superior al saldo disponible.")
+                    st.success(f"📦 ¡Salida Exitosa! Se han retirado {cant} huevos del lote {id_s}. Destino: {mot}")
+                    st.balloons(); st.rerun()
+                else: st.error("Stock insuficiente.")
 
-# --- 🔍 5. FICHA DE TRAZABILIDAD ---
+# --- 🔍 5. FICHA DE TRAZABILIDAD (RESTALLECIDA) ---
 elif choice == "🔍 Ficha de Trazabilidad":
-    st.header("🔎 Expediente de Lote")
+    st.header("🔎 Expediente de Lote (Hoja de Vida)")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
     target = st.selectbox("Buscar Lote:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
+    
     if target != "Seleccionar...":
         info = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{target}'", conn).iloc[0]
         movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha FROM historial WHERE id_lote='{target}' ORDER BY fecha DESC", conn)
+        
         st.subheader("📊 Estado en Tiempo Real")
         m1, m2, m3, m4 = st.columns(4)
-        with m1: st.markdown(f'<div class="info-card"><div class="info-label">Saldo</div><div class="info-value">{info["saldo"]}</div></div>', unsafe_allow_html=True)
-        with m2: st.markdown(f'<div class="info-card"><div class="info-label">Días Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])}</div></div>', unsafe_allow_html=True)
-        with m3: st.markdown(f'<div class="info-card"><div class="info-label">Planta</div><div class="info-value">{info["planta"]}</div></div>', unsafe_allow_html=True)
-        with m4: st.markdown(f'<div class="info-card"><div class="info-label">Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
+        with m1: st.markdown(f'<div class="info-card"><div class="info-label">Saldo en Cámara</div><div class="info-value">{info["saldo"]} Huevos</div></div>', unsafe_allow_html=True)
+        with m2: st.markdown(f'<div class="info-card"><div class="info-label">Equivalencia</div><div class="info-value">{round(info["saldo"]/360, 1)} Cajas</div></div>', unsafe_allow_html=True)
+        with m3: st.markdown(f'<div class="info-card"><div class="info-label">Días de Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])} Días</div></div>', unsafe_allow_html=True)
+        with m4: st.markdown(f'<div class="info-card"><div class="info-label">Edad Repro</div><div class="info-value">{info["edad_repro"] if info["edad_repro"] else "S/D"} Sem.</div></div>', unsafe_allow_html=True)
+
+        st.subheader("📋 Datos Técnicos de Producción")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.markdown(f'<div class="info-card"><div class="info-label">Granja</div><div class="info-value">{info["granja"]}</div></div>', unsafe_allow_html=True)
+        with c2: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
+        with c3: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
+        with c4: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
+
+        st.warning(f"📝 **Observaciones Sanitarias:** {info['obs_sanitarias']}")
+        st.divider()
+        col_t1, col_t2 = st.columns([3, 1])
+        col_t1.subheader("📜 Movimientos Registrados")
+        col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx")
         st.dataframe(movs, use_container_width=True)
 
-# --- 📜 HISTORIAL GENERAL (PLANTA CORREGIDA) ---
+# --- 📜 HISTORIAL GENERAL ---
 elif choice == "📜 Historial General":
     st.header("📝 Auditoría de Movimientos")
     h_df = pd.read_sql_query("SELECT * FROM historial ORDER BY fecha DESC", conn)
-    if not h_df.empty:
-        st.dataframe(h_df, use_container_width=True)
-        st.download_button("📥 DESCARGAR AUDITORÍA", to_excel(h_df), "Auditoria.xlsx")
+    st.dataframe(h_df, use_container_width=True)
 
 st.markdown('<div class="footer">Desarrollado por Gerencia de Control de Gestión</div>', unsafe_allow_html=True)
