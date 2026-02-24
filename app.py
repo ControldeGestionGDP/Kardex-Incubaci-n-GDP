@@ -197,7 +197,7 @@ if choice == "🟢 Recepción":
 
 # --- 🟡 INVENTARIO GLOBAL ---
 elif choice == "🟡 Inventario Global":
-    st.header("📦 Consolidado de Stock")
+    st.header("Consolidado de Stock")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
         b1, b2, b3 = st.columns(3)
@@ -217,7 +217,7 @@ elif choice == "🟡 Inventario Global":
 
 # --- 📊 SEGUIMIENTO & DECISIONES ---
 elif choice == "📊 Seguimiento & Decisiones":
-    st.header("🔬 Prioridades de Carga")
+    st.header("Prioridades de Carga")
     df = pd.read_sql_query("SELECT id_unico, lote_nro, planta, granja, linea_genetica, edad_repro, fecha_postura, saldo FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
         s1, s2 = st.columns(2)
@@ -239,7 +239,7 @@ elif choice == "📊 Seguimiento & Decisiones":
 
 # --- 🔵 SALIDAS ---
 elif choice == "🔵 Salidas (Incubación)":
-    st.header("📤 Orden de Salida")
+    st.header("Orden de Salida")
     lotes_disponibles = pd.read_sql_query("SELECT id_unico, saldo, planta FROM lotes WHERE saldo > 0", conn)
     if not lotes_disponibles.empty:
         with st.form("form_salida", clear_on_submit=True):
@@ -293,7 +293,7 @@ elif choice == "🔍 Ficha de Trazabilidad":
 
 # --- 📜 HISTORIAL GENERAL ---
 elif choice == "📜 Historial General":
-    st.header("📝 Auditoría de Movimientos")
+    st.header("Auditoría de Movimientos")
     h_df = pd.read_sql_query("SELECT * FROM historial ORDER BY fecha DESC", conn)
     if not h_df.empty:
         h1, h2, h3 = st.columns(3)
