@@ -133,22 +133,7 @@ if choice == "🟢 Recepción":
                     conn.commit(); st.success(f"✅ Lote {id_u} guardado"); st.balloons(); st.rerun()
                 except: st.error("❌ Error: ID duplicado.")
 
-    with t2:
-        st.header("Editor de Lotes")
-        lista = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
-        id_edit = st.selectbox("Seleccione ID:", ["Seleccionar..."] + lista['id_unico'].tolist())
-        if id_edit != "Seleccionar...":
-            datos = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{id_edit}'", conn).iloc[0]
-            with st.form("f_edit"):
-                col_e1, col_e2 = st.columns(2); e_granja = col_e1.text_input("Granja", value=datos['granja']); e_planta = col_e2.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca"], index=0 if datos['planta']=="P.I. Tarapoto" else 1)
-                col_f1, col_f2 = st.columns(2); e_f_postura = col_f1.date_input("Fecha Postura", value=pd.to_datetime(datos['fecha_postura']).date()); e_f_llegada = col_f2.date_input("Fecha Llegada", value=pd.to_datetime(datos['fecha_llegada']).date())
-                ce1, ce2, ce3 = st.columns(3); e_gen = ce1.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]); e_edad = ce2.number_input("Edad Repro", value=int(datos['edad_repro']) if datos['edad_repro'] else 0); e_saldo = ce3.number_input("Saldo", value=int(datos['saldo']))
-                e_obs = st.text_area("Observaciones", value=datos['obs_sanitarias'])
-                if st.form_submit_button("🔄 ACTUALIZAR"):
-                    c.execute("UPDATE lotes SET granja=?, planta=?, fecha_postura=?, fecha_llegada=?, linea_genetica=?, edad_repro=?, saldo=?, obs_sanitarias=? WHERE id_unico=?", (e_granja, e_planta, e_f_postura, e_f_llegada, e_gen, e_edad, e_saldo, e_obs, id_edit))
-                    conn.commit(); st.toast("Actualizado", icon="✅"); st.rerun()
-
-# --- 🟡 INVENTARIO GLOBAL ---
+# --- 🟡 INVENTARIO GLOBAL (TODOS LOS CAMPOS) ---
 elif choice == "🟡 Inventario Global":
     st.header("📦 Consolidado de Stock")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
@@ -172,27 +157,45 @@ elif choice == "📊 Seguimiento & Decisiones":
             else: return ['background-color: #d4edda'] * len(row)
         st.dataframe(df.style.apply(color_semaforo, axis=1), use_container_width=True)
 
-# --- 🔵 SALIDAS (CON NOTIFICACIÓN) ---
+# --- 🔵 SALIDAS (CON NOTIFICACIÓN CLARA) ---
 elif choice == "🔵 Salidas (Incubación)":
     st.header("📤 Orden de Salida")
-    lotes = pd.read_sql_query("SELECT id_unico, saldo, planta FROM lotes WHERE saldo > 0", conn)
-    if not lotes.empty:
-        with st.form("f_sal"):
-            id_s = st.selectbox("Seleccionar Lote", lotes['id_unico'])
-            cant = st.number_input("Cantidad", min_value=1)
-            mot = st.selectbox("Destino", ["Carga Incubadora", "Venta", "Merma"])
+    lotes_disponibles = pd.read_sql_query("SELECT id_unico, saldo, planta FROM lotes WHERE saldo > 0", conn)
+    
+    if not lotes_disponibles.empty:
+        with st.form("form_salida", clear_on_submit=True):
+            id_s = st.selectbox("Seleccione Lote para Retirar Huevo", lotes_disponibles['id_unico'])
+            cant = st.number_input("Cantidad a Salir", min_value=1)
+            mot = st.selectbox("Motivo / Destino", ["Carga Incubadora", "Venta", "Merma"])
+            
             if st.form_submit_button("🚀 PROCESAR SALIDA"):
-                planta_actual = lotes[lotes['id_unico'] == id_s]['planta'].values[0]
-                saldo_actual = lotes[lotes['id_unico'] == id_s]['saldo'].values[0]
+                # Obtener info del lote seleccionado
+                lote_info = lotes_disponibles[lotes_disponibles['id_unico'] == id_s].iloc[0]
+                planta_actual = lote_info['planta']
+                saldo_actual = lote_info['saldo']
+                
                 if cant <= saldo_actual:
+                    # 1. Actualizar DB
                     c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant, id_s))
-                    c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, planta_actual, "SALIDA", cant, mot, datetime.now()))
+                    c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", 
+                             (id_s, planta_actual, "SALIDA", cant, mot, datetime.now()))
                     conn.commit()
-                    st.success(f"📦 ¡Salida Exitosa! Se han retirado {cant} huevos del lote {id_s}. Destino: {mot}")
-                    st.balloons(); st.rerun()
-                else: st.error("Stock insuficiente.")
+                    
+                    # 2. Notificación Visual Crítica
+                    st.success(f"✅ OPERACIÓN EXITOSA: Se han retirado {cant} huevos del lote {id_s} ({planta_actual}) con destino a {mot}.")
+                    st.balloons()
+                    st.toast(f"Salida registrada: {id_s}", icon="📦")
+                    
+                    # 3. Pausa breve y refresco
+                    import time
+                    time.sleep(2)
+                    st.rerun()
+                else:
+                    st.error(f"❌ ERROR: El saldo actual es de {saldo_actual}. No puedes retirar {cant}.")
+    else:
+        st.warning("No hay lotes con saldo disponible para realizar salidas.")
 
-# --- 🔍 5. FICHA DE TRAZABILIDAD (RESTALLECIDA) ---
+# --- 🔍 5. FICHA DE TRAZABILIDAD (HOJA DE VIDA RESTAURADA) ---
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("🔎 Expediente de Lote (Hoja de Vida)")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
@@ -218,9 +221,7 @@ elif choice == "🔍 Ficha de Trazabilidad":
 
         st.warning(f"📝 **Observaciones Sanitarias:** {info['obs_sanitarias']}")
         st.divider()
-        col_t1, col_t2 = st.columns([3, 1])
-        col_t1.subheader("📜 Movimientos Registrados")
-        col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx")
+        st.subheader("📜 Movimientos Registrados")
         st.dataframe(movs, use_container_width=True)
 
 # --- 📜 HISTORIAL GENERAL ---
