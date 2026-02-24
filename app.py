@@ -37,12 +37,25 @@ st.markdown(f"""
     
     [data-testid="stSidebar"] {{ background-color: #07456a; }}
     [data-testid="stSidebar"] * {{ color: white !important; }}
-    .footer {{ position: fixed; bottom: 10px; right: 10px; color: #6c757d; font-size: 12px; font-weight: bold; }}
+    
+    /* FOOTER CENTRADO */
+    .footer {{ 
+        position: fixed; 
+        bottom: 10px; 
+        left: 0;
+        right: 0;
+        text-align: center;
+        color: #6c757d; 
+        font-size: 12px; 
+        font-weight: bold; 
+        z-index: 999;
+    }}
+    
     .sidebar-logo {{ font-size: 50px; text-align: center; margin-bottom: -10px; }}
     </style>
     """, unsafe_allow_html=True)
 
-# --- SISTEMA DE BASE DE DATOS (MEJORA 1: CACHE DE CONEXIÓN) ---
+# --- SISTEMA DE BASE DE DATOS ---
 @st.cache_resource
 def init_db():
     conn = sqlite3.connect('incubacion_ultra_v4.db', check_same_thread=False)
@@ -51,7 +64,7 @@ def init_db():
                     id_unico TEXT PRIMARY KEY, lote_nro TEXT, procedencia TEXT, planta TEXT, 
                     granja TEXT, linea_genetica TEXT, edad_repro INTEGER, 
                     fecha_postura DATE, fecha_llegada DATE, cantidad_inicial INTEGER, 
-                    saldo INTEGER, transportista TEXT, obs_sanitarias TEXT)''')
+                    saldo INTEGER, obs_sanitarias TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS historial (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, id_lote TEXT, planta TEXT,
                     tipo TEXT, cantidad INTEGER, motivo TEXT, fecha TIMESTAMP)''')
@@ -63,7 +76,7 @@ c = conn.cursor()
 
 # --- LÓGICA DE NEGOCIO ---
 def generar_id_y_procedencia(lote_txt):
-    lote_txt = lote_txt.upper().strip() # MEJORA 2: LIMPIEZA DE TEXTO
+    lote_txt = lote_txt.upper().strip()
     fecha_hoy = datetime.now().strftime("%d%m%y")
     if lote_txt.isdigit():
         procedencia = "CDG"
@@ -107,14 +120,14 @@ if choice == "🟢 Recepción":
             planta = col2.selectbox("Planta Destino", ["P.I. Tarapoto", "P.I. Pucacaca"])
             c1, c2, c3 = st.columns(3); granja = c1.text_input("Granja"); genetica = c2.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]); edad_repro = c3.number_input("Edad Repro", min_value=0, value=0)
             c4, c5, c6 = st.columns(3); cant_h = c4.number_input("Cantidad", min_value=0); f_postura = c5.date_input("Fecha Postura"); f_llegada = c6.date_input("Fecha Llegada")
-            transp = st.text_input("Transportista"); obs = st.text_area("Notas Sanitarias")
+            obs = st.text_area("Notas Sanitarias")
             if st.form_submit_button("💾 GUARDAR REGISTRO"):
                 id_u, proc = generar_id_y_procedencia(lote_input)
                 try:
-                    c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (id_u, lote_input.strip().upper(), proc, planta, granja, genetica, (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, cant_h, cant_h, transp, obs))
+                    c.execute("INSERT INTO lotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (id_u, lote_input.strip().upper(), proc, planta, granja, genetica, (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, cant_h, cant_h, obs))
                     c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
                     conn.commit(); st.success(f"✅ Lote {id_u} guardado"); st.balloons(); st.rerun()
-                except sqlite3.IntegrityError: st.error("❌ Error: El ID ya existe. Verifica si ya ingresaste este lote hoy.")
+                except sqlite3.IntegrityError: st.error("❌ Error: El ID ya existe.")
     with t2:
         st.header("Editor de Lotes")
         lista = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
@@ -155,11 +168,10 @@ elif choice == "🔍 Ficha de Trazabilidad":
         with c4: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
 
         st.subheader("🚚 Detalles de Recepción y Logística")
-        l1, l2, l3, l4 = st.columns(4)
-        with l1: st.markdown(f'<div class="info-card"><div class="info-label">Transportista</div><div class="info-value">{info["transportista"]}</div></div>', unsafe_allow_html=True)
-        with l2: st.markdown(f'<div class="info-card"><div class="info-label">F. Postura</div><div class="info-value">{info["fecha_postura"]}</div></div>', unsafe_allow_html=True)
-        with l3: st.markdown(f'<div class="info-card"><div class="info-label">F. Llegada</div><div class="info-value">{info["fecha_llegada"]}</div></div>', unsafe_allow_html=True)
-        with l4: st.markdown(f'<div class="info-card"><div class="info-label">Planta</div><div class="info-value">{info["planta"]}</div></div>', unsafe_allow_html=True)
+        l1, l2, l3 = st.columns(3)
+        with l1: st.markdown(f'<div class="info-card"><div class="info-label">F. Postura</div><div class="info-value">{info["fecha_postura"]}</div></div>', unsafe_allow_html=True)
+        with l2: st.markdown(f'<div class="info-card"><div class="info-label">F. Llegada</div><div class="info-value">{info["fecha_llegada"]}</div></div>', unsafe_allow_html=True)
+        with l3: st.markdown(f'<div class="info-card"><div class="info-label">Planta</div><div class="info-value">{info["planta"]}</div></div>', unsafe_allow_html=True)
 
         st.warning(f"📝 **Observaciones Sanitarias:** {info['obs_sanitarias']}")
         st.divider()
@@ -169,17 +181,14 @@ elif choice == "🔍 Ficha de Trazabilidad":
         col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx")
         st.dataframe(movs, use_container_width=True)
 
-# --- 🟡 INVENTARIO GLOBAL (MEJORA 3: SEMÁFORO DE DÍAS) ---
+# --- 🟡 INVENTARIO GLOBAL ---
 elif choice == "🟡 Inventario Global":
     st.header("📦 Consolidado de Stock")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
-        
-        # Estilo para alertar lotes viejos
         def style_dias(v):
             return 'color: red; font-weight: bold' if v > 7 else 'color: green'
-            
         st.dataframe(df[['id_unico', 'planta', 'procedencia', 'saldo', 'Días Almacén']].style.applymap(style_dias, subset=['Días Almacén']), use_container_width=True)
         st.download_button("📥 DESCARGAR EXCEL", to_excel(df), "Stock.xlsx")
 
@@ -191,14 +200,13 @@ elif choice == "📊 Seguimiento & Decisiones":
         df['Días'] = df['fecha_postura'].apply(calcular_dias)
         st.table(df.sort_values(by="Días", ascending=False))
 
-# --- 🔵 SALIDAS (MEJORA 4: VALIDACIÓN DE STOCK) ---
+# --- 🔵 SALIDAS ---
 elif choice == "🔵 Salidas (Incubación)":
     st.header("📤 Orden de Salida")
     lotes = pd.read_sql_query("SELECT id_unico, saldo FROM lotes WHERE saldo > 0", conn)
     if not lotes.empty:
         with st.form("f_sal"):
             id_s = st.selectbox("Lote", lotes['id_unico'])
-            # Buscamos el saldo real del lote seleccionado
             saldo_actual = int(lotes[lotes['id_unico'] == id_s]['saldo'].values[0])
             cant = st.number_input(f"Cantidad (Máximo disponible: {saldo_actual})", min_value=1, max_value=saldo_actual)
             mot = st.selectbox("Destino", ["Carga Incubadora", "Venta", "Merma"])
@@ -206,8 +214,6 @@ elif choice == "🔵 Salidas (Incubación)":
                 c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant, id_s))
                 c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, "PLANTA", "SALIDA", cant, mot, datetime.now()))
                 conn.commit(); st.success("Salida registrada con éxito"); st.rerun()
-    else:
-        st.info("No hay huevos en stock para procesar salidas.")
 
 # --- 📜 HISTORIAL GENERAL ---
 elif choice == "📜 Historial General":
@@ -217,4 +223,5 @@ elif choice == "📜 Historial General":
         st.download_button("📥 DESCARGAR AUDITORÍA COMPLETA", to_excel(h_df), "Auditoria_General.xlsx")
     st.dataframe(h_df, use_container_width=True)
 
+# FOOTER CENTRADO
 st.markdown('<div class="footer">Desarrollado por Gerencia de Control de Gestión</div>', unsafe_allow_html=True)
