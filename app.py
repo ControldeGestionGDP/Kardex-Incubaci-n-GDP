@@ -268,25 +268,25 @@ elif choice == "🔍 Ficha de Trazabilidad":
         info = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{target}'", conn).iloc[0]
         movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha FROM historial WHERE id_lote='{target}' ORDER BY fecha DESC", conn)
         
-        st.subheader("📊 Estado en Tiempo Real")
+        st.subheader("Estado en Tiempo Real")
         m1, m2, m3, m4 = st.columns(4)
         with m1: st.markdown(f'<div class="info-card"><div class="info-label">Saldo en Cámara</div><div class="info-value">{info["saldo"]} Huevos</div></div>', unsafe_allow_html=True)
         with m2: st.markdown(f'<div class="info-card"><div class="info-label">Equivalencia</div><div class="info-value">{round(info["saldo"]/360, 1)} Cajas</div></div>', unsafe_allow_html=True)
         with m3: st.markdown(f'<div class="info-card"><div class="info-label">Días de Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])} Días</div></div>', unsafe_allow_html=True)
         with m4: st.markdown(f'<div class="info-card"><div class="info-label">Edad Repro</div><div class="info-value">{info["edad_repro"] if info["edad_repro"] else "S/D"} Sem.</div></div>', unsafe_allow_html=True)
 
-        st.subheader("📋 Datos Técnicos de Producción")
+        st.subheader("Datos Técnicos de Producción")
         c1, c2, c3, c4 = st.columns(4)
         with c1: st.markdown(f'<div class="info-card"><div class="info-label">Granja</div><div class="info-value">{info["granja"]}</div></div>', unsafe_allow_html=True)
         with c2: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
         with c3: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
         with c4: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
 
-        st.warning(f"📝 **Observaciones Sanitarias:** {info['obs_sanitarias']}")
+        st.warning(f" **Observaciones Sanitarias:** {info['obs_sanitarias']}")
         st.divider()
         
         col_t1, col_t2 = st.columns([3, 1])
-        col_t1.subheader("📜 Movimientos Registrados")
+        col_t1.subheader("Movimientos Registrados")
         if col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx"):
             st.toast(f"Reporte de {target} descargado", icon="📄")
         st.dataframe(movs, use_container_width=True)
