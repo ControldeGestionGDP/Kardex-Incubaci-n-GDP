@@ -133,16 +133,13 @@ if choice == "🟢 Recepción":
                 else:
                     id_u, proc = generar_id_y_procedencia(lote_input)
                     try:
-                        # CORRECCIÓN CLAVE: Especificamos las columnas para evitar el error de "13 columns"
                         sql_lotes = """INSERT INTO lotes 
                                      (id_unico, lote_nro, procedencia, planta, granja, linea_genetica, 
                                       edad_repro, fecha_postura, fecha_llegada, cantidad_inicial, saldo, obs_sanitarias) 
                                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
-                        
                         c.execute(sql_lotes, (id_u, lote_input, proc, planta, granja, genetica, 
                                             (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, 
                                             cant_h, cant_h, obs))
-                        
                         c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", 
                                  (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
                         conn.commit()
@@ -168,22 +165,42 @@ if choice == "🟢 Recepción":
                     st.toast("Datos actualizados con éxito", icon="🔄")
                     st.info(f"Lote {id_edit} ha sido modificado."); time.sleep(1.5); st.rerun()
 
-# --- 🟡 INVENTARIO GLOBAL ---
+# --- 🟡 INVENTARIO GLOBAL (CON BUSCADORES) ---
 elif choice == "🟡 Inventario Global":
     st.header("📦 Consolidado de Stock")
     df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
+        # Fila de Buscadores
+        b1, b2, b3 = st.columns(3)
+        search_lote = b1.text_input("🔍 Buscar por Nro Lote:")
+        filter_planta = b2.multiselect("Filtrar Planta:", df['planta'].unique(), default=df['planta'].unique())
+        filter_proc = b3.multiselect("Filtrar Procedencia:", df['procedencia'].unique(), default=df['procedencia'].unique())
+        
+        # Aplicar filtros al DataFrame
+        if search_lote:
+            df = df[df['lote_nro'].str.contains(search_lote, case=False)]
+        df = df[df['planta'].isin(filter_planta)]
+        df = df[df['procedencia'].isin(filter_proc)]
+
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         cols = ['id_unico', 'saldo', 'Días Almacén', 'planta', 'procedencia', 'granja', 'linea_genetica', 'edad_repro', 'fecha_postura', 'fecha_llegada', 'obs_sanitarias']
         st.dataframe(df[cols], use_container_width=True)
-        if st.download_button("📥 DESCARGAR EXCEL COMPLETO", to_excel(df), "Inventario_Completo.xlsx"):
+        if st.download_button("📥 DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario.xlsx"):
             st.toast("Descarga iniciada", icon="📊")
 
-# --- 📊 SEGUIMIENTO & DECISIONES ---
+# --- 📊 SEGUIMIENTO & DECISIONES (CON BUSCADORES) ---
 elif choice == "📊 Seguimiento & Decisiones":
     st.header("🔬 Prioridades de Carga")
     df = pd.read_sql_query("SELECT id_unico, planta, granja, linea_genetica, edad_repro, fecha_postura, saldo FROM lotes WHERE saldo > 0", conn)
     if not df.empty:
+        # Fila de Buscadores
+        s1, s2 = st.columns(2)
+        f_planta = s1.multiselect("Planta:", df['planta'].unique(), default=df['planta'].unique())
+        f_gen = s2.multiselect("Genética:", df['linea_genetica'].unique(), default=df['linea_genetica'].unique())
+        
+        df = df[df['planta'].isin(f_planta)]
+        df = df[df['linea_genetica'].isin(f_gen)]
+
         df['Días'] = df['fecha_postura'].apply(calcular_dias)
         df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
         df = df.sort_values(by="Días", ascending=False)
@@ -212,7 +229,7 @@ elif choice == "🔵 Salidas (Incubación)":
                     st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados."); st.balloons(); time.sleep(1.5); st.rerun()
                 else: st.error("Saldo insuficiente.")
 
-# --- 🔍 5. FICHA DE TRAZABILIDAD ---
+# --- 🔍 5. FICHA DE TRAZABILIDAD (INTACTA) ---
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("🔎 Expediente de Lote (Hoja de Vida)")
     lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
@@ -245,12 +262,23 @@ elif choice == "🔍 Ficha de Trazabilidad":
             st.toast(f"Reporte de {target} descargado", icon="📄")
         st.dataframe(movs, use_container_width=True)
 
-# --- 📜 HISTORIAL GENERAL ---
+# --- 📜 HISTORIAL GENERAL (CON BUSCADORES) ---
 elif choice == "📜 Historial General":
     st.header("📝 Auditoría de Movimientos")
     h_df = pd.read_sql_query("SELECT * FROM historial ORDER BY fecha DESC", conn)
     if not h_df.empty:
-        if st.download_button("📥 DESCARGAR AUDITORÍA", to_excel(h_df), "Auditoria.xlsx"):
+        # Fila de Buscadores
+        h1, h2, h3 = st.columns(3)
+        h_search = h1.text_input("🔍 Buscar Lote o ID:")
+        h_tipo = h2.multiselect("Tipo Movimiento:", h_df['tipo'].unique(), default=h_df['tipo'].unique())
+        h_planta = h3.multiselect("Filtrar Planta:", h_df['planta'].unique(), default=h_df['planta'].unique())
+        
+        # Aplicar filtros
+        if h_search:
+            h_df = h_df[h_df['id_lote'].str.contains(h_search, case=False)]
+        h_df = h_df[(h_df['tipo'].isin(h_tipo)) & (h_df['planta'].isin(h_planta))]
+
+        if st.download_button("📥 DESCARGAR HISTORIAL FILTRADO", to_excel(h_df), "Auditoria.xlsx"):
             st.toast("Auditoría exportada", icon="📜")
         st.dataframe(h_df, use_container_width=True)
 
