@@ -1,312 +1,188 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-import sqlite3
-import io
-import time
+import gspread
+from google.oauth2.service_account import Credentials
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="IncubaTrack ERP | Gestión Estratégica", page_icon="🥚", layout="wide")
+# =============================
+# CONFIGURACIÓN GOOGLE SHEETS
+# =============================
 
-# --- ESTILOS CORPORATIVOS ---
-st.markdown(f"""
-    <style>
-    .main {{ background-color: #f8f9fa; }}
-    .stButton>button {{
-        background-color: #ed701b;
-        color: white;
-        border-radius: 5px;
-        border: none;
-        font-weight: bold;
-        width: 100%;
-        height: 3em;
-    }}
-    .stButton>button:hover {{ border: 2px solid #07456a; color: #07456a; }}
-    h1, h2, h3 {{ color: #07456a !important; font-family: 'Segoe UI', sans-serif; }}
-    
-    .info-card {{
-        background-color: white;
-        padding: 15px;
-        border-radius: 10px;
-        border-left: 5px solid #ed701b;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
-        margin-bottom: 15px;
-        height: 100%;
-    }}
-    .info-label {{ color: #6c757d; font-size: 0.75rem; font-weight: bold; text-transform: uppercase; }}
-    .info-value {{ color: #07456a; font-size: 1.1rem; font-weight: bold; }}
-    
-    [data-testid="stSidebar"] {{ background-color: #07456a; }}
-    [data-testid="stSidebar"] * {{ color: white !important; }}
-    
-    .footer {{ 
-        position: fixed; 
-        bottom: 10px; 
-        left: 0; 
-        right: 0; 
-        text-align: center; 
-        color: #6c757d; 
-        font-size: 12px; 
-        font-weight: bold; 
-    }}
-    
-    .sidebar-logo {{ font-size: 50px; text-align: center; margin-bottom: -10px; }}
+scope = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
 
-    /* Animación de pollitos mejorada */
-    @keyframes falling {{
-        0% {{ transform: translateY(-10vh) translateX(0) rotate(0deg); opacity: 1; }}
-        100% {{ transform: translateY(100vh) translateX(20px) rotate(360deg); opacity: 0; }}
-    }}
-    .pollito-anim {{
-        position: fixed;
-        top: -5vh;
-        font-size: 2.5rem;
-        z-index: 999999;
-        pointer-events: none;
-        animation: falling 2s linear forwards;
-    }}
-    </style>
-    """, unsafe_allow_html=True)
+creds = Credentials.from_service_account_info(
+    st.secrets["gcp_service_account"],
+    scopes=scope
+)
 
-# --- FUNCIÓN PARA LLUVIA DE POLLITOS ---
-def lluvia_de_pollitos():
-    """Crea una ráfaga masiva de pollitos"""
-    container = st.empty()
-    pollitos_html = ""
-    # Generamos 30 pollitos en posiciones y retrasos aleatorios
-    for i in range(30):
-        pos_x = (i * 3.3) # Distribución en el ancho
-        delay = (i % 5) * 0.2 # Escalonado para que no caigan todos al mismo tiempo
-        pollitos_html += f'<div class="pollito-anim" style="left:{pos_x}%; animation-delay:{delay}s;">🐣</div>'
-    
-    container.markdown(pollitos_html, unsafe_allow_html=True)
-    time.sleep(2.5) # Tiempo suficiente para que caigan antes del rerun
-    container.empty()
+client = gspread.authorize(creds)
 
-# --- SISTEMA DE BASE DE DATOS ---
-def init_db():
-    conn = sqlite3.connect('incubacion_ultra_v4.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS lotes (
-                    id_unico TEXT PRIMARY KEY, lote_nro TEXT, procedencia TEXT, planta TEXT, 
-                    granja TEXT, linea_genetica TEXT, edad_repro INTEGER, 
-                    fecha_postura DATE, fecha_llegada DATE, cantidad_inicial INTEGER, 
-                    saldo INTEGER, obs_sanitarias TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS historial (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, id_lote TEXT, planta TEXT,
-                    tipo TEXT, cantidad INTEGER, motivo TEXT, fecha TIMESTAMP)''')
-    conn.commit()
-    return conn
+# 🔴 PEGA AQUÍ EL ID DE TU GOOGLE SHEET
+SPREADSHEET_ID = "PEGA_AQUI_EL_ID_DE_TU_SHEET"
 
-conn = init_db()
-c = conn.cursor()
+sheet = client.open_by_key(SPREADSHEET_ID)
 
-# --- LÓGICA DE NEGOCIO ---
-def generar_id_y_procedencia(lote_txt):
-    lote_txt = lote_txt.upper().strip()
-    timestamp = datetime.now().strftime("%d%m%y-%H%M%S")
-    if lote_txt.isdigit():
-        procedencia = "CDG"
-        id_gen = f"CDG-{lote_txt}-{timestamp}"
-    elif "SF" in lote_txt:
-        procedencia = "San Fernando"
-        id_gen = f"{lote_txt}-{timestamp}"
-    elif "SE" in lote_txt:
-        procedencia = "Santa Elena"
-        id_gen = f"{lote_txt}-{timestamp}"
+lotes_ws = sheet.worksheet("lotes")
+historial_ws = sheet.worksheet("historial")
+
+
+# =============================
+# FUNCIONES
+# =============================
+
+def cargar_lotes():
+    data = lotes_ws.get_all_records()
+    return pd.DataFrame(data)
+
+def cargar_historial():
+    data = historial_ws.get_all_records()
+    return pd.DataFrame(data)
+
+def insertar_lote(data):
+    lotes_ws.append_row(data)
+
+def insertar_historial(data):
+    historial_ws.append_row(data)
+
+def actualizar_saldo(id_unico, nuevo_saldo):
+    df = cargar_lotes()
+    fila = df[df["id_unico"] == id_unico].index
+    if len(fila) > 0:
+        row_number = fila[0] + 2
+        lotes_ws.update_cell(row_number, 11, nuevo_saldo)
+
+
+# =============================
+# INTERFAZ
+# =============================
+
+st.title("IncubaTrack ERP")
+
+menu = st.sidebar.selectbox(
+    "Menú",
+    ["Registrar Lote", "Ver Inventario", "Registrar Movimiento"]
+)
+
+# =============================
+# REGISTRAR LOTE
+# =============================
+
+if menu == "Registrar Lote":
+
+    st.subheader("Nuevo Lote")
+
+    lote_nro = st.text_input("Número de Lote")
+    procedencia = st.text_input("Procedencia")
+    planta = st.text_input("Planta")
+    granja = st.text_input("Granja")
+    linea = st.text_input("Línea Genética")
+    edad = st.number_input("Edad Reproductiva", min_value=0)
+    fecha_postura = st.date_input("Fecha Postura")
+    fecha_llegada = st.date_input("Fecha Llegada")
+    cantidad = st.number_input("Cantidad Inicial", min_value=0)
+    obs = st.text_area("Observaciones")
+
+    if st.button("Guardar Lote"):
+
+        id_unico = "L-" + datetime.now().strftime("%Y%m%d%H%M%S")
+
+        nuevo_lote = [
+            id_unico,
+            lote_nro,
+            procedencia,
+            planta,
+            granja,
+            linea,
+            edad,
+            str(fecha_postura),
+            str(fecha_llegada),
+            cantidad,
+            cantidad,
+            obs
+        ]
+
+        insertar_lote(nuevo_lote)
+
+        nuevo_hist = [
+            "",
+            id_unico,
+            planta,
+            "INGRESO",
+            cantidad,
+            "Recepción",
+            str(datetime.now())
+        ]
+
+        insertar_historial(nuevo_hist)
+
+        st.success("Lote guardado correctamente")
+
+
+# =============================
+# VER INVENTARIO
+# =============================
+
+elif menu == "Ver Inventario":
+
+    st.subheader("Inventario Actual")
+
+    df = cargar_lotes()
+
+    if df.empty:
+        st.warning("No hay lotes registrados")
     else:
-        procedencia = "Otros"
-        id_gen = f"{lote_txt}-{timestamp}"
-    return id_gen, procedencia
+        st.dataframe(df)
 
-def calcular_dias(f_postura):
-    if isinstance(f_postura, str):
-        f_postura = datetime.strptime(f_postura, '%Y-%m-%d').date()
-    return (date.today() - f_postura).days
 
-def clasificar_repro(edad):
-    if not edad or edad == 0: return "S/D"
-    if edad < 30: return "Joven (<30)"
-    if 30 <= edad <= 39: return "Óptima (30-39)"
-    if 40 <= edad <= 49: return "Madura (40-49)"
-    return "Vieja (≥50)"
+# =============================
+# REGISTRAR MOVIMIENTO
+# =============================
 
-def to_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Reporte')
-    return output.getvalue()
+elif menu == "Registrar Movimiento":
 
-# --- SIDEBAR ---
-st.sidebar.markdown('<div class="sidebar-logo">🐣</div>', unsafe_allow_html=True)
-st.sidebar.title("MENU ERP")
-menu = ["🟢 Recepción", "🟡 Inventario Global", "📊 Seguimiento & Decisiones", "🔵 Salidas (Incubación)", "🔍 Ficha de Trazabilidad", "📜 Historial General"]
-choice = st.sidebar.radio("Navegación:", menu)
+    st.subheader("Salida / Ajuste")
 
-# --- 🟢 1. RECEPCIÓN ---
-if choice == "🟢 Recepción":
-    t1, t2 = st.tabs(["📥 Nuevo Ingreso", "✏️ Editar/Corregir"])
-    with t1:
-        st.header("Registro de Ingresos")
-        with st.form("form_ingreso", clear_on_submit=True):
-            col1, col2 = st.columns(2)
-            lote_input = col1.text_input("Nro de Lote")
-            planta = col2.selectbox("Planta Destino", ["P.I. Tarapoto", "P.I. Pucacaca"])
-            c1, c2, c3 = st.columns(3); granja = c1.text_input("Granja"); genetica = c2.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]); edad_repro = c3.number_input("Edad Repro", min_value=0, value=0)
-            c4, c5, c6 = st.columns(3); cant_h = c4.number_input("Cantidad", min_value=0); f_postura = c5.date_input("Fecha Postura"); f_llegada = c6.date_input("Fecha Llegada")
-            obs = st.text_area("Notas Sanitarias")
-            
-            if st.form_submit_button("💾 GUARDAR REGISTRO"):
-                if not lote_input:
-                    st.error("❌ El número de lote es obligatorio.")
-                else:
-                    id_u, proc = generar_id_y_procedencia(lote_input)
-                    try:
-                        sql_lotes = """INSERT INTO lotes 
-                                     (id_unico, lote_nro, procedencia, planta, granja, linea_genetica, 
-                                      edad_repro, fecha_postura, fecha_llegada, cantidad_inicial, saldo, obs_sanitarias) 
-                                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"""
-                        c.execute(sql_lotes, (id_u, lote_input, proc, planta, granja, genetica, 
-                                            (edad_repro if edad_repro > 0 else None), f_postura, f_llegada, 
-                                            cant_h, cant_h, obs))
-                        c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", 
-                                 (id_u, planta, "INGRESO", cant_h, "Recepción", datetime.now()))
-                        conn.commit()
-                        st.toast(f"Lote {id_u} registrado", icon="🐣")
-                        st.success(f"✅ Lote {id_u} guardado correctamente.")
-                        lluvia_de_pollitos() # Ejecuta la ráfaga
-                        st.rerun()
-                    except Exception as e: 
-                        st.error(f"❌ Error al guardar: {e}")
-    with t2:
-        st.header("Editor de Lotes")
-        lista = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
-        id_edit = st.selectbox("Seleccione ID:", ["Seleccionar..."] + lista['id_unico'].tolist())
-        if id_edit != "Seleccionar...":
-            datos = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{id_edit}'", conn).iloc[0]
-            with st.form("f_edit"):
-                col_e1, col_e2 = st.columns(2); e_granja = col_e1.text_input("Granja", value=datos['granja']); e_planta = col_e2.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca"], index=0 if datos['planta']=="P.I. Tarapoto" else 1)
-                col_f1, col_f2 = st.columns(2); e_f_postura = col_f1.date_input("Fecha Postura", value=pd.to_datetime(datos['fecha_postura']).date()); e_f_llegada = col_f2.date_input("Fecha Llegada", value=pd.to_datetime(datos['fecha_llegada']).date())
-                ce1, ce2, ce3 = st.columns(3); e_gen = ce1.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]); e_edad = ce2.number_input("Edad Repro", value=int(datos['edad_repro']) if datos['edad_repro'] else 0); e_saldo = ce3.number_input("Saldo", value=int(datos['saldo']))
-                e_obs = st.text_area("Observaciones", value=datos['obs_sanitarias'])
-                if st.form_submit_button("🔄 ACTUALIZAR DATOS"):
-                    c.execute("UPDATE lotes SET granja=?, planta=?, fecha_postura=?, fecha_llegada=?, linea_genetica=?, edad_repro=?, saldo=?, obs_sanitarias=? WHERE id_unico=?", (e_granja, e_planta, e_f_postura, e_f_llegada, e_gen, e_edad, e_saldo, e_obs, id_edit))
-                    conn.commit()
-                    st.toast("Datos actualizados con éxito", icon="🔄")
-                    st.info(f"Lote {id_edit} ha sido modificado."); time.sleep(1.5); st.rerun()
+    df = cargar_lotes()
 
-# --- 🟡 INVENTARIO GLOBAL ---
-elif choice == "🟡 Inventario Global":
-    st.header("Consolidado de Stock")
-    df = pd.read_sql_query("SELECT * FROM lotes WHERE saldo > 0", conn)
-    if not df.empty:
-        b1, b2, b3 = st.columns(3)
-        search_lote = b1.text_input("🔍 Buscar por Nro Lote:")
-        filter_planta = b2.multiselect("Filtrar Planta:", df['planta'].unique(), default=df['planta'].unique())
-        filter_proc = b3.multiselect("Filtrar Procedencia:", df['procedencia'].unique(), default=df['procedencia'].unique())
-        
-        if search_lote:
-            df = df[df['lote_nro'].str.contains(search_lote, case=False)]
-        df = df[df['planta'].isin(filter_planta) & df['procedencia'].isin(filter_proc)]
+    if df.empty:
+        st.warning("No hay lotes disponibles")
+    else:
 
-        df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
-        cols = ['id_unico', 'saldo', 'Días Almacén', 'planta', 'procedencia', 'granja', 'linea_genetica', 'edad_repro', 'fecha_postura', 'fecha_llegada', 'obs_sanitarias']
-        st.dataframe(df[cols], use_container_width=True)
-        if st.download_button("📥 DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario_Filtrado.xlsx"):
-            st.toast("Descarga iniciada", icon="📊")
+        id_unico = st.selectbox("Seleccionar Lote", df["id_unico"])
 
-# --- 📊 SEGUIMIENTO & DECISIONES ---
-elif choice == "📊 Seguimiento & Decisiones":
-    st.header("Prioridades de Carga")
-    df = pd.read_sql_query("SELECT id_unico, lote_nro, planta, granja, linea_genetica, edad_repro, fecha_postura, saldo FROM lotes WHERE saldo > 0", conn)
-    if not df.empty:
-        s1, s2 = st.columns(2)
-        search_seg = s1.text_input("🔍 Buscar Lote o ID:")
-        f_planta = s2.multiselect("Filtrar Planta:", df['planta'].unique(), default=df['planta'].unique())
-        
-        if search_seg:
-            df = df[df['id_unico'].str.contains(search_seg, case=False) | df['lote_nro'].str.contains(search_seg, case=False)]
-        df = df[df['planta'].isin(f_planta)]
+        tipo = st.selectbox("Tipo", ["SALIDA", "AJUSTE"])
 
-        df['Días'] = df['fecha_postura'].apply(calcular_dias)
-        df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
-        df = df.sort_values(by="Días", ascending=False)
-        def color_semaforo(row):
-            if row['Días'] > 10: return ['background-color: #ffcccc'] * len(row)
-            elif 7 <= row['Días'] <= 9: return ['background-color: #fff4cc'] * len(row)
-            else: return ['background-color: #d4edda'] * len(row)
-        st.dataframe(df.style.apply(color_semaforo, axis=1), use_container_width=True)
+        cantidad = st.number_input("Cantidad", min_value=1)
 
-# --- 🔵 SALIDAS ---
-elif choice == "🔵 Salidas (Incubación)":
-    st.header("Orden de Salida")
-    lotes_disponibles = pd.read_sql_query("SELECT id_unico, saldo, planta FROM lotes WHERE saldo > 0", conn)
-    if not lotes_disponibles.empty:
-        with st.form("form_salida", clear_on_submit=True):
-            id_s = st.selectbox("Seleccione Lote", lotes_disponibles['id_unico'])
-            cant = st.number_input("Cantidad", min_value=1)
-            mot = st.selectbox("Motivo", ["Carga Incubadora", "Venta", "Merma"])
-            if st.form_submit_button("🚀 PROCESAR SALIDA"):
-                lote_info = lotes_disponibles[lotes_disponibles['id_unico'] == id_s].iloc[0]
-                if cant <= lote_info['saldo']:
-                    c.execute("UPDATE lotes SET saldo = saldo - ? WHERE id_unico = ?", (cant, id_s))
-                    c.execute("INSERT INTO historial (id_lote, planta, tipo, cantidad, motivo, fecha) VALUES (?,?,?,?,?,?)", (id_s, lote_info['planta'], "SALIDA", cant, mot, datetime.now()))
-                    conn.commit()
-                    st.toast(f"Salida registrada: {id_s}", icon="📤")
-                    st.success(f"✅ ¡Operación Exitosa! {cant} huevos retirados.")
-                    lluvia_de_pollitos() # Ejecuta la ráfaga
-                    st.rerun()
-                else: st.error("Saldo insuficiente.")
+        motivo = st.text_input("Motivo")
 
-# --- 🔍 5. FICHA DE TRAZABILIDAD ---
-elif choice == "🔍 Ficha de Trazabilidad":
-    st.header("Expediente de Lote")
-    lotes_todos = pd.read_sql_query("SELECT id_unico FROM lotes", conn)
-    target = st.selectbox("Buscar Lote:", ["Seleccionar..."] + lotes_todos['id_unico'].tolist())
-    
-    if target != "Seleccionar...":
-        info = pd.read_sql_query(f"SELECT * FROM lotes WHERE id_unico='{target}'", conn).iloc[0]
-        movs = pd.read_sql_query(f"SELECT tipo, cantidad, motivo, fecha FROM historial WHERE id_lote='{target}' ORDER BY fecha DESC", conn)
-        
-        st.subheader("Estado en Tiempo Real")
-        m1, m2, m3, m4 = st.columns(4)
-        with m1: st.markdown(f'<div class="info-card"><div class="info-label">Saldo en Cámara</div><div class="info-value">{info["saldo"]} Huevos</div></div>', unsafe_allow_html=True)
-        with m2: st.markdown(f'<div class="info-card"><div class="info-label">Equivalencia</div><div class="info-value">{round(info["saldo"]/360, 1)} Cajas</div></div>', unsafe_allow_html=True)
-        with m3: st.markdown(f'<div class="info-card"><div class="info-label">Días de Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])} Días</div></div>', unsafe_allow_html=True)
-        with m4: st.markdown(f'<div class="info-card"><div class="info-label">Edad Repro</div><div class="info-value">{info["edad_repro"] if info["edad_repro"] else "S/D"} Sem.</div></div>', unsafe_allow_html=True)
+        if st.button("Registrar Movimiento"):
 
-        st.subheader("Datos Técnicos de Producción")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: st.markdown(f'<div class="info-card"><div class="info-label">Granja</div><div class="info-value">{info["granja"]}</div></div>', unsafe_allow_html=True)
-        with c2: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
-        with c3: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
-        with c4: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
+            lote = df[df["id_unico"] == id_unico].iloc[0]
 
-        st.warning(f" **Observaciones Sanitarias:** {info['obs_sanitarias']}")
-        st.divider()
-        
-        col_t1, col_t2 = st.columns([3, 1])
-        col_t1.subheader("Movimientos Registrados")
-        if col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx"):
-            st.toast(f"Reporte de {target} descargado", icon="📄")
-        st.dataframe(movs, use_container_width=True)
+            saldo_actual = lote["saldo"]
 
-# --- 📜 HISTORIAL GENERAL ---
-elif choice == "📜 Historial General":
-    st.header("Auditoría de Movimientos")
-    h_df = pd.read_sql_query("SELECT * FROM historial ORDER BY fecha DESC", conn)
-    if not h_df.empty:
-        h1, h2, h3 = st.columns(3)
-        h_search = h1.text_input("🔍 Buscar Lote o ID:")
-        h_tipo = h2.multiselect("Filtrar Tipo:", h_df['tipo'].unique(), default=h_df['tipo'].unique())
-        h_planta = h3.multiselect("Filtrar Planta:", h_df['planta'].unique(), default=h_df['planta'].unique())
-        
-        if h_search:
-            h_df = h_df[h_df['id_lote'].str.contains(h_search, case=False)]
-        h_df = h_df[h_df['tipo'].isin(h_tipo) & h_df['planta'].isin(h_planta)]
+            nuevo_saldo = saldo_actual - cantidad
 
-        if st.download_button("📥 DESCARGAR AUDITORÍA FILTRADA", to_excel(h_df), "Auditoria.xlsx"):
-            st.toast("Auditoría exportada", icon="📜")
-        st.dataframe(h_df, use_container_width=True)
+            if nuevo_saldo < 0:
+                st.error("Saldo insuficiente")
+            else:
 
-st.markdown('<div class="footer">Desarrollado por Gerencia de Control de Gestión</div>', unsafe_allow_html=True)
+                actualizar_saldo(id_unico, nuevo_saldo)
+
+                nuevo_hist = [
+                    "",
+                    id_unico,
+                    lote["planta"],
+                    tipo,
+                    cantidad,
+                    motivo,
+                    str(datetime.now())
+                ]
+
+                insertar_historial(nuevo_hist)
+
+                st.success("Movimiento registrado")
