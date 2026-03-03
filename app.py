@@ -4,9 +4,9 @@ from datetime import datetime, date
 import gspread
 from google.oauth2.service_account import Credentials
 
-# =============================
-# CONFIGURACIÓN GOOGLE SHEETS
-# =============================
+# =====================================
+# CONEXIÓN GOOGLE SHEETS
+# =====================================
 
 scope = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -20,32 +20,30 @@ creds = Credentials.from_service_account_info(
 
 client = gspread.authorize(creds)
 
-# 🔴 PEGA AQUÍ EL ID DE TU GOOGLE SHEET
-SPREADSHEET_ID = "PEGA_AQUI_EL_ID_DE_TU_SHEET"
+SPREADSHEET_ID = "13nw5vYfEFnP3RjHXK7CC7124-MDKCe-iAwfycvTUeS0"
 
 sheet = client.open_by_key(SPREADSHEET_ID)
 
 lotes_ws = sheet.worksheet("lotes")
-historial_ws = sheet.worksheet("historial")
+movimientos_ws = sheet.worksheet("movimientos")
 
-
-# =============================
+# =====================================
 # FUNCIONES
-# =============================
+# =====================================
 
 def cargar_lotes():
     data = lotes_ws.get_all_records()
     return pd.DataFrame(data)
 
-def cargar_historial():
-    data = historial_ws.get_all_records()
+def cargar_movimientos():
+    data = movimientos_ws.get_all_records()
     return pd.DataFrame(data)
 
 def insertar_lote(data):
     lotes_ws.append_row(data)
 
-def insertar_historial(data):
-    historial_ws.append_row(data)
+def insertar_movimiento(data):
+    movimientos_ws.append_row(data)
 
 def actualizar_saldo(id_unico, nuevo_saldo):
     df = cargar_lotes()
@@ -54,10 +52,9 @@ def actualizar_saldo(id_unico, nuevo_saldo):
         row_number = fila[0] + 2
         lotes_ws.update_cell(row_number, 11, nuevo_saldo)
 
-
-# =============================
+# =====================================
 # INTERFAZ
-# =============================
+# =====================================
 
 st.title("IncubaTrack ERP")
 
@@ -66,9 +63,9 @@ menu = st.sidebar.selectbox(
     ["Registrar Lote", "Ver Inventario", "Registrar Movimiento"]
 )
 
-# =============================
+# =====================================
 # REGISTRAR LOTE
-# =============================
+# =====================================
 
 if menu == "Registrar Lote":
 
@@ -106,7 +103,7 @@ if menu == "Registrar Lote":
 
         insertar_lote(nuevo_lote)
 
-        nuevo_hist = [
+        nuevo_mov = [
             "",
             id_unico,
             planta,
@@ -116,14 +113,13 @@ if menu == "Registrar Lote":
             str(datetime.now())
         ]
 
-        insertar_historial(nuevo_hist)
+        insertar_movimiento(nuevo_mov)
 
         st.success("Lote guardado correctamente")
 
-
-# =============================
+# =====================================
 # VER INVENTARIO
-# =============================
+# =====================================
 
 elif menu == "Ver Inventario":
 
@@ -136,10 +132,9 @@ elif menu == "Ver Inventario":
     else:
         st.dataframe(df)
 
-
-# =============================
+# =====================================
 # REGISTRAR MOVIMIENTO
-# =============================
+# =====================================
 
 elif menu == "Registrar Movimiento":
 
@@ -162,9 +157,7 @@ elif menu == "Registrar Movimiento":
         if st.button("Registrar Movimiento"):
 
             lote = df[df["id_unico"] == id_unico].iloc[0]
-
             saldo_actual = lote["saldo"]
-
             nuevo_saldo = saldo_actual - cantidad
 
             if nuevo_saldo < 0:
@@ -173,7 +166,7 @@ elif menu == "Registrar Movimiento":
 
                 actualizar_saldo(id_unico, nuevo_saldo)
 
-                nuevo_hist = [
+                nuevo_mov = [
                     "",
                     id_unico,
                     lote["planta"],
@@ -183,6 +176,6 @@ elif menu == "Registrar Movimiento":
                     str(datetime.now())
                 ]
 
-                insertar_historial(nuevo_hist)
+                insertar_movimiento(nuevo_mov)
 
                 st.success("Movimiento registrado")
