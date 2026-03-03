@@ -149,8 +149,6 @@ choice = st.sidebar.radio("Navegación:", menu)
 # -------------------- RECEPCIÓN --------------------
 if choice == "🟢 Recepción":
     t1, t2 = st.tabs(["📥 Nuevo Ingreso", "✏️ Editar/Corregir"])
-    
-    # --- NUEVO INGRESO ---
     with t1:
         st.header("Registro de Ingresos")
         with st.form("form_ingreso", clear_on_submit=True):
@@ -176,8 +174,6 @@ if choice == "🟢 Recepción":
                     st.success(f"Lote {id_u} registrado correctamente")
                     lluvia_de_pollitos()
                     st.rerun()
-    
-    # --- EDITAR/CORREGIR ---
     with t2:
         st.header("Editor de Lotes")
         df_lotes = cargar_lotes()
@@ -196,26 +192,27 @@ if choice == "🟢 Recepción":
                 e_edad = ce2.number_input("Edad Repro", value=int(datos['edad_repro']))
                 e_saldo = ce3.number_input("Saldo", value=int(datos['saldo']))
                 e_obs = st.text_area("Observaciones", value=datos['obs_sanitarias'])
-                
                 if st.form_submit_button("🔄 ACTUALIZAR DATOS"):
-                    # --- Actualización segura para Sheets ---
-                    df_idx = df_lotes[df_lotes['id_unico']==id_edit].index[0] + 2
-                    valores = [
-                        str(info) if info is not None else "" for info in [
-                            datos.get('lote_nro', ''),
-                            datos.get('procedencia', ''),
-                            e_planta,
-                            e_granja,
-                            e_gen,
-                            e_edad,
-                            str(e_f_postura),
-                            str(e_f_llegada),
-                            e_saldo,
-                            e_saldo,
-                            e_obs
-                        ]
-                    ]
-                    lotes_ws.update(f"A{df_idx}:K{df_idx}", [valores])
+                    # --- Actualización segura por columna ---
+                    headers = df_lotes.columns.tolist()
+                    fila_idx = df_lotes[df_lotes['id_unico']==id_edit].index[0] + 2  # fila real en Sheets
+                    update_dict = {
+                        'lote_nro': datos.get('lote_nro', ''),
+                        'procedencia': datos.get('procedencia', ''),
+                        'planta': e_planta,
+                        'granja': e_granja,
+                        'linea_genetica': e_gen,
+                        'edad_repro': e_edad,
+                        'fecha_postura': str(e_f_postura),
+                        'fecha_llegada': str(e_f_llegada),
+                        'saldo': e_saldo,
+                        'saldo_total': e_saldo,
+                        'obs_sanitarias': e_obs
+                    }
+                    for col_name, val in update_dict.items():
+                        if col_name in headers:
+                            col_idx = headers.index(col_name) + 1
+                            lotes_ws.update_cell(fila_idx, col_idx, str(val))
                     st.toast("Datos actualizados con éxito")
                     st.rerun()
 
