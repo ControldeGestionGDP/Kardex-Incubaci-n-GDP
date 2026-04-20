@@ -108,7 +108,7 @@ def actualizar_saldo(id_unico, nuevo_saldo):
     if len(fila) > 0:
         row_number = fila[0] + 2
         col_index = df.columns.get_loc("saldo") + 1
-        lotes_ws.update_cell(row_number, col_index, nuevo_saldo)
+        lotes_ws.update_cell(row_number, col_index, int(nuevo_saldo))
 
 # --- LÓGICA DE NEGOCIO ---
 def generar_id_y_procedencia(lote_txt):
