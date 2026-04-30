@@ -144,11 +144,11 @@ def to_excel(df):
 # --- SIDEBAR ---
 st.sidebar.markdown('<div class="sidebar-logo">🐣</div>', unsafe_allow_html=True)
 st.sidebar.title("MENU ERP")
-menu = ["🟢 Recepción", "🟡 Inventario Global", "📊 Seguimiento & Decisiones", "🔵 Salidas (Incubación)", "🔍 Ficha de Trazabilidad", "📜 Historial General"]
+menu = ["Recepción", "Inventario Global", "Seguimiento & Decisiones", "Salidas (Incubación)", "Ficha de Trazabilidad", "Historial General"]
 choice = st.sidebar.radio("Navegación:", menu)
 
 # -------------------- RECEPCIÓN --------------------
-if choice == "🟢 Recepción":
+if choice == "Recepción":
     t1, t2 = st.tabs(["Nuevo Ingreso", "Editar/Corregir"])
     with t1:
         st.header("Registro de Ingresos")
@@ -259,7 +259,7 @@ if choice == "🟢 Recepción":
                         st.info("Debes marcar la casilla de confirmación.")
 
 # -------------------- INVENTARIO --------------------
-elif choice == "🟡 Inventario Global":
+elif choice == "Inventario Global":
     st.header("Consolidado de Stock")
     df = cargar_lotes()
     if not df.empty:
@@ -270,7 +270,7 @@ elif choice == "🟡 Inventario Global":
         st.download_button("📥 DESCARGAR EXCEL", to_excel(df), "Inventario_Filtrado.xlsx")
 
 # -------------------- SEGUIMIENTO Y DECISIONES --------------------
-elif choice == "📊 Seguimiento & Decisiones":
+elif choice == "Seguimiento & Decisiones":
     st.header("Seguimiento y Clasificación")
     df = cargar_lotes()
     if not df.empty:
@@ -286,7 +286,7 @@ elif choice == "📊 Seguimiento & Decisiones":
         st.dataframe(df[cols_viz].style.apply(color_semaforo, axis=1), use_container_width=True)
 
 # -------------------- SALIDAS --------------------
-elif choice == "🔵 Salidas (Incubación)":
+elif choice == "Salidas (Incubación)":
     st.header("Orden de Salida")
     df = cargar_lotes()
     df = df[df["saldo"]>0]
@@ -295,7 +295,7 @@ elif choice == "🔵 Salidas (Incubación)":
             id_s = st.selectbox("Seleccione Lote", df["id_unico"])
             cant = st.number_input("Cantidad", min_value=1)
             mot = st.selectbox("Motivo", ["Carga Incubadora", "Venta", "Merma"])
-            if st.form_submit_button("🚀 PROCESAR SALIDA"):
+            if st.form_submit_button("PROCESAR SALIDA"):
                 lote_info = df[df["id_unico"]==id_s].iloc[0]
                 if cant<=lote_info['saldo']:
                     nuevo_saldo = lote_info['saldo'] - cant
@@ -307,7 +307,7 @@ elif choice == "🔵 Salidas (Incubación)":
                 else: st.error("Saldo insuficiente")
 
 # -------------------- FICHA DE TRAZABILIDAD --------------------
-elif choice == "🔍 Ficha de Trazabilidad":
+elif choice == "Ficha de Trazabilidad":
     st.header("Expediente de Lote")
     df = cargar_lotes()
     target = st.selectbox("Buscar Lote:", ["Seleccionar..."] + df['id_unico'].tolist())
@@ -332,7 +332,7 @@ elif choice == "🔍 Ficha de Trazabilidad":
         st.dataframe(movs, use_container_width=True)
 
 # -------------------- HISTORIAL GENERAL --------------------
-elif choice == "📜 Historial General":
+elif choice == "Historial General":
     st.header("Auditoría de Movimientos")
     with st.spinner("Cargando historial desde el Hub..."):
         h_df = cargar_movimientos()
@@ -348,7 +348,7 @@ elif choice == "📜 Historial General":
         st.markdown(f"**Total de registros encontrados:** {len(df_mostrar)}")
         csv = df_mostrar.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 DESCARGAR AUDITORÍA (CSV)",
+            label="DESCARGAR AUDITORÍA (CSV)",
             data=csv,
             file_name=f"auditoria_movimientos_{datetime.now().strftime('%d_%m_%Y')}.csv",
             mime='text/csv',
