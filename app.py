@@ -317,6 +317,7 @@ elif choice == "Inventario Global":
     
     if not df.empty:
         # 2. Procesamiento y Reglas de Negocio
+        # Mantenemos los nombres de columnas originales para los cálculos internos
         df = df[df["saldo"] > 0].copy()
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
@@ -325,16 +326,16 @@ elif choice == "Inventario Global":
         total_huevos = df['saldo'].sum()
         lotes_criticos = len(df[df['Días Almacén'] > 10])
         
-        # Cálculo del Promedio Ponderado de Almacenamiento (Realista según cantidades)
+        # Cálculo del Promedio Ponderado de Almacenamiento (Realista según volumen)
         if total_huevos > 0:
             avg_almacen = round((df['Días Almacén'] * df['saldo']).sum() / total_huevos, 1)
         else:
             avg_almacen = 0
         
-        # Visualización de KPIs
+        # Visualización de KPIs con estilo ejecutivo
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Huevos</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Unidades</div></div>', unsafe_allow_html=True)
         with m2:
             st.markdown(f'<div class="info-card" style="border-left: 5px solid #ff4b4b;"><div class="info-label">Lotes Críticos (>10d)</div><div class="info-value">{lotes_criticos} Lotes</div></div>', unsafe_allow_html=True)
         with m3:
@@ -342,7 +343,7 @@ elif choice == "Inventario Global":
 
         st.markdown("---")
 
-        # 4. BLOQUE DE FILTROS (Compacto y en Negrita)
+        # 4. BLOQUE DE FILTROS
         with st.container(border=True):
             st.markdown("🔍 **Filtros de Búsqueda**")
             col_f1, col_f2, col_f3 = st.columns(3)
@@ -366,29 +367,32 @@ elif choice == "Inventario Global":
             df_filtrado = df_filtrado[df_filtrado['lote_nro'].astype(str).str.contains(filtro_lote, case=False) | 
                                       df_filtrado['id_unico'].str.contains(filtro_lote, case=False)]
 
-        # 5. REGLA DE SEMÁFORO (Visualización de Seguimiento)
+        # 5. REGLA DE SEMÁFORO (Se aplica sobre los nombres de columna originales)
         def aplicar_estilo_seguimiento(row):
             if row['Días Almacén'] > 10:
-                return ['background-color: #ffcccc'] * len(row) # Rojo (Crítico)
+                return ['background-color: #ffcccc'] * len(row) # Rojo
             elif 8 <= row['Días Almacén'] <= 9:
-                return ['background-color: #fff4cc'] * len(row) # Amarillo (Alerta)
+                return ['background-color: #fff4cc'] * len(row) # Amarillo
             else:
-                return ['background-color: #d4edda'] * len(row) # Verde (Óptimo)
+                return ['background-color: #d4edda'] * len(row) # Verde
 
         # 6. TABLA DE DATOS DETALLADA
         st.subheader("Detalle de Existencias")
         
-        # Ordenamos por antigüedad para priorizar FIFO
+        # Preparación del DF a mostrar (Orden FIFO)
         df_display = df_filtrado.sort_values(by="Días Almacén", ascending=False).drop(columns=['fecha_llegada_dt'])
-
-        # --- TRUCO PARA ENCABEZADOS EN NEGRITA ---
-        # Renombramos las columnas envolviéndolas en asteriscos (Markdown)
-        df_display.columns = [f"**{col.upper()}**" for col in df_display.columns]
+        
+        # Estilizamos el DF manteniendo los nombres internos
+        df_styled = df_display.style.apply(aplicar_estilo_seguimiento, axis=1)
+        
+        # Creamos el diccionario para poner encabezados en Mayúsculas y Negritas visualmente
+        columnas_config = {col: st.column_config.Column(f"**{col.upper()}**") for col in df_display.columns}
         
         st.dataframe(
-            df_display.style.apply(aplicar_estilo_seguimiento, axis=1), 
+            df_styled, 
             use_container_width=True, 
-            hide_index=True
+            hide_index=True,
+            column_config=columnas_config
         )
         
         # Leyenda de Colores
@@ -400,7 +404,7 @@ elif choice == "Inventario Global":
             </div>
         """, unsafe_allow_html=True)
 
-        # 7. ACCIONES (Descarga con Notificación)
+        # 7. ACCIONES
         st.markdown("---")
         if st.download_button(
             label="📊 EXPORTAR REPORTE DE INVENTARIO",
@@ -411,7 +415,6 @@ elif choice == "Inventario Global":
 
     else:
         st.info("No hay lotes con saldo disponible.")
-
 # -------------------- SALIDAS --------------------
 elif choice == "Salidas (Incubación)":
     st.header("Orden de Salida")
