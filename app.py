@@ -73,12 +73,13 @@ h1, h2, h3 { color: #07456a !important; font-family: 'Segoe UI', sans-serif; }
 def lluvia_de_pollitos():
     container = st.empty()
     pollitos_html = ""
-    for i in range(30):
-        pos_x = i * 3.3
-        delay = (i % 5) * 0.2
+    for i in range(25): # Un poco menos de pollitos para no saturar
+        pos_x = i * 4
+        delay = (i % 5) * 0.1 # Caída más rápida
         pollitos_html += f'<div class="pollito-anim" style="left:{pos_x}%; animation-delay:{delay}s;">🐣</div>'
+    
     container.markdown(pollitos_html, unsafe_allow_html=True)
-    time.sleep(2.5)
+    time.sleep(1.2) # Reducir a la mitad el bloqueo del sistema
     container.empty()
 
 # --- CONEXIÓN GOOGLE SHEETS ---
