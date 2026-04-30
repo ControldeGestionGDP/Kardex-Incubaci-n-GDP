@@ -322,7 +322,7 @@ elif choice == "Inventario Global":
 
         # --- BLOQUE DE FILTROS ---
         with st.container(border=True):
-            st.subheader("Filtros de Búsqueda")
+            st.markdown("Filtros de Búsqueda")
             col_f1, col_f2, col_f3 = st.columns(3)
             
             # Filtro por Planta
