@@ -149,7 +149,7 @@ choice = st.sidebar.radio("Navegación:", menu)
 
 # -------------------- RECEPCIÓN --------------------
 if choice == "🟢 Recepción":
-    t1, t2 = st.tabs(["📥 Nuevo Ingreso", "✏️ Editar/Corregir"])
+    t1, t2 = st.tabs(["Nuevo Ingreso", "Editar/Corregir"])
     with t1:
         st.header("Registro de Ingresos")
         with st.form("form_ingreso", clear_on_submit=True):
@@ -170,7 +170,7 @@ if choice == "🟢 Recepción":
             f_llegada = st.date_input("Fecha Llegada")
             obs = st.text_area("Notas Sanitarias")
             
-            if st.form_submit_button("💾 GUARDAR REGISTRO"):
+            if st.form_submit_button("GUARDAR REGISTRO"):
                 if not lote_input:
                     st.error("El número de lote es obligatorio")
                 else:
@@ -213,7 +213,7 @@ if choice == "🟢 Recepción":
                 
                 e_obs = st.text_area("Observaciones", value=datos['obs_sanitarias'])
                 
-                if st.form_submit_button("🔄 ACTUALIZAR DATOS"):
+                if st.form_submit_button("ACTUALIZAR DATOS"):
                     headers = df_lotes.columns.tolist()
                     fila_idx = df_lotes[df_lotes['id_unico']==id_edit].index[0] + 2
                     update_dict = {
@@ -236,11 +236,11 @@ if choice == "🟢 Recepción":
                     st.rerun()
 
             st.markdown("---")
-            with st.expander("⚠️ ZONA DE PELIGRO - Borrar Registro"):
+            with st.expander("ZONA DE PELIGRO - Borrar Registro"):
                 st.warning(f"¿Estás seguro de que deseas eliminar el lote **{id_edit}**? Esta acción no se puede deshacer.")
                 confirmar_check = st.checkbox("Confirmo que deseo borrar este registro permanentemente.")
                 
-                if st.button("🗑️ ELIMINAR INGRESO AHORA"):
+                if st.button("ELIMINAR INGRESO AHORA"):
                     if confirmar_check:
                         df_actual = cargar_lotes()
                         filas_encontradas = df_actual[df_actual['id_unico'] == id_edit].index
