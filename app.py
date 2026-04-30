@@ -322,24 +322,37 @@ elif choice == "Inventario Global":
         
         # 2. KPIs RESUMEN
         total_huevos = df['saldo'].sum()
-        lotes_criticos = len(df[df['Días Almacén'] > 10])
+        df_criticos = df[df['Días Almacén'] > 10]
+        lotes_criticos_count = len(df_criticos)
         
-        # CÁLCULO PONDERADO: (Días * Saldo) / Total Saldo
+        # Cálculo PONDERADO DE ALMACENAMIENTO
         if total_huevos > 0:
             avg_almacen = round((df['Días Almacén'] * df['saldo']).sum() / total_huevos, 1)
         else:
             avg_almacen = 0
         
         m1, m2, m3 = st.columns(3)
+        
         with m1:
-            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Huevos</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Unidades</div></div>', unsafe_allow_html=True)
+        
         with m2:
-            st.markdown(f'<div class="info-card" style="border-left: 5px solid #ff4b4b;"><div class="info-label">Lotes Críticos (>10d)</div><div class="info-value">{lotes_criticos} Lotes</div></div>', unsafe_allow_html=True)
+            # Lógica dinámica para Lotes Críticos
+            if 0 < lotes_criticos_count <= 3:
+                nombres_criticos = ", ".join(df_criticos['lote_nro'].astype(str).tolist())
+                label_critico = f"Críticos: {nombres_criticos}"
+            else:
+                label_critico = f"Lotes Críticos (>10d)"
+                
+            st.markdown(f'''
+                <div class="info-card" style="border-left: 5px solid #ff4b4b;">
+                    <div class="info-label">{label_critico}</div>
+                    <div class="info-value">{lotes_criticos_count} Lotes</div>
+                </div>
+            ''', unsafe_allow_html=True)
+            
         with m3:
-            # Terminología logística corregida
             st.markdown(f'<div class="info-card" style="border-left: 5px solid #07456a;"><div class="info-label">Promedio Días Almacenamiento</div><div class="info-value">{avg_almacen} Días</div></div>', unsafe_allow_html=True)
-
-        st.markdown("---")
 
         # 3. FILTROS
         with st.container(border=True):
