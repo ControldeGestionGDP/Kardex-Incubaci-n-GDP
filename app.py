@@ -312,49 +312,45 @@ if choice == "Recepción":
 elif choice == "Inventario Global":
     st.header("📊 Inteligencia de Inventario y Stock")
     
-    # 1. Cargar datos base
     df = cargar_lotes()
     
     if not df.empty:
-        # 2. Procesamiento y Reglas de Negocio
-        # Mantenemos los nombres de columnas originales para los cálculos internos
+        # 1. Procesamiento de Reglas de Negocio
         df = df[df["saldo"] > 0].copy()
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
         
-        # 3. KPIs RESUMEN (Cálculos de Control de Gestión)
+        # 2. KPIs RESUMEN
         total_huevos = df['saldo'].sum()
         lotes_criticos = len(df[df['Días Almacén'] > 10])
         
-        # Cálculo del Promedio Ponderado de Almacenamiento (Realista según volumen)
+        # CÁLCULO PONDERADO: (Días * Saldo) / Total Saldo
         if total_huevos > 0:
             avg_almacen = round((df['Días Almacén'] * df['saldo']).sum() / total_huevos, 1)
         else:
             avg_almacen = 0
         
-        # Visualización de KPIs con estilo ejecutivo
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Huevos</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Unidades</div></div>', unsafe_allow_html=True)
         with m2:
             st.markdown(f'<div class="info-card" style="border-left: 5px solid #ff4b4b;"><div class="info-label">Lotes Críticos (>10d)</div><div class="info-value">{lotes_criticos} Lotes</div></div>', unsafe_allow_html=True)
         with m3:
+            # Terminología logística corregida
             st.markdown(f'<div class="info-card" style="border-left: 5px solid #07456a;"><div class="info-label">Promedio Días Almacenamiento</div><div class="info-value">{avg_almacen} Días</div></div>', unsafe_allow_html=True)
 
         st.markdown("---")
 
-        # 4. BLOQUE DE FILTROS
+        # 3. FILTROS
         with st.container(border=True):
             st.markdown("🔍 **Filtros de Búsqueda**")
             col_f1, col_f2, col_f3 = st.columns(3)
-            
             lista_plantas = ["TODAS"] + sorted(df['planta'].unique().tolist())
             filtro_planta = col_f1.selectbox("Planta:", lista_plantas)
             
             df['fecha_llegada_dt'] = pd.to_datetime(df['fecha_llegada']).dt.date
             fechas_disponibles = sorted(df['fecha_llegada_dt'].unique())
             filtro_fecha = col_f2.selectbox("Fecha Llegada:", ["TODAS"] + [str(f) for f in fechas_disponibles])
-            
             filtro_lote = col_f3.text_input("Buscar Lote:", placeholder="Nro o ID...")
 
         # Aplicación de Filtros
@@ -367,35 +363,27 @@ elif choice == "Inventario Global":
             df_filtrado = df_filtrado[df_filtrado['lote_nro'].astype(str).str.contains(filtro_lote, case=False) | 
                                       df_filtrado['id_unico'].str.contains(filtro_lote, case=False)]
 
-        # 5. REGLA DE SEMÁFORO (Se aplica sobre los nombres de columna originales)
+        # 4. REGLA DE SEMÁFORO
         def aplicar_estilo_seguimiento(row):
-            if row['Días Almacén'] > 10:
-                return ['background-color: #ffcccc'] * len(row) # Rojo
-            elif 8 <= row['Días Almacén'] <= 9:
-                return ['background-color: #fff4cc'] * len(row) # Amarillo
-            else:
-                return ['background-color: #d4edda'] * len(row) # Verde
+            if row['Días Almacén'] > 10: return ['background-color: #ffcccc'] * len(row)
+            elif 8 <= row['Días Almacén'] <= 9: return ['background-color: #fff4cc'] * len(row)
+            else: return ['background-color: #d4edda'] * len(row)
 
-        # 6. TABLA DE DATOS DETALLADA
+        # 5. TABLA DE DATOS DETALLADA
         st.subheader("Detalle de Existencias")
-        
-        # Preparación del DF a mostrar (Orden FIFO)
         df_display = df_filtrado.sort_values(by="Días Almacén", ascending=False).drop(columns=['fecha_llegada_dt'])
         
-        # Estilizamos el DF manteniendo los nombres internos
-        df_styled = df_display.style.apply(aplicar_estilo_seguimiento, axis=1)
-        
-        # Creamos el diccionario para poner encabezados en Mayúsculas y Negritas visualmente
-        columnas_config = {col: st.column_config.Column(f"**{col.upper()}**") for col in df_display.columns}
+        # Quitamos los asteriscos y solo usamos Mayúsculas para los encabezados
+        # Esto evita que salgan los símbolos feos si Streamlit no los renderiza
+        columnas_config = {col: st.column_config.Column(col.upper()) for col in df_display.columns}
         
         st.dataframe(
-            df_styled, 
+            df_display.style.apply(aplicar_estilo_seguimiento, axis=1), 
             use_container_width=True, 
             hide_index=True,
             column_config=columnas_config
         )
         
-        # Leyenda de Colores
         st.markdown("""
             <div style="display: flex; gap: 20px; font-size: 12px; margin-top: 10px;">
                 <span>🟢 <b>Óptimo:</b> 0-7 días</span>
@@ -404,7 +392,7 @@ elif choice == "Inventario Global":
             </div>
         """, unsafe_allow_html=True)
 
-        # 7. ACCIONES
+        # 6. EXPORTACIÓN
         st.markdown("---")
         if st.download_button(
             label="📊 EXPORTAR REPORTE DE INVENTARIO",
@@ -412,7 +400,6 @@ elif choice == "Inventario Global":
             file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx"
         ):
             st.toast("Reporte generado con éxito", icon="📥")
-
     else:
         st.info("No hay lotes con saldo disponible.")
 # -------------------- SALIDAS --------------------
