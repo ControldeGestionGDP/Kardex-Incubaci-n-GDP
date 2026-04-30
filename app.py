@@ -308,31 +308,49 @@ if choice == "Recepción":
                         # Si intenta borrar sin marcar el check, le avisamos con otro toast
                         st.toast("Debes marcar la casilla de confirmación primero", icon="🚫")
 
-# -------------------- INVENTARIO GLOBAL (CON SEGUIMIENTO INTEGRADO) --------------------
+# -------------------- INVENTARIO GLOBAL (VERSIÓN PRO) --------------------
 elif choice == "Inventario Global":
-    st.header("Consolidado de Stock e Indicadores")
+    st.header("📊 Inteligencia de Inventario y Stock")
     
     df = cargar_lotes()
     
     if not df.empty:
-        # 1. Preparación de datos (Cálculos de Seguimiento)
+        # 1. Procesamiento de Reglas de Negocio
         df = df[df["saldo"] > 0].copy()
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
+        
+        # 2. KPIs RESUMEN (Lo que el CEO quiere ver primero)
+        # Esto reemplaza la necesidad de una sección aparte de "Decisiones"
+        total_huevos = df['saldo'].sum()
+        lotes_criticos = len(df[df['Días Almacén'] > 10])
+        
+        m1, m2, m3 = st.columns(3)
+        with m1:
+            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Unidades</div></div>', unsafe_allow_html=True)
+        with m2:
+            st.markdown(f'<div class="info-card" style="border-left: 5px solid #ff4b4b;"><div class="info-label">Lotes Críticos (>10d)</div><div class="info-value">{lotes_criticos} Lotes</div></div>', unsafe_allow_html=True)
+        with m3:
+            avg_age = round(df['Días Almacén'].mean(), 1) if not df.empty else 0
+            st.markdown(f'<div class="info-card" style="border-left: 5px solid #07456a;"><div class="info-label">Promedio Edad Stock</div><div class="info-value">{avg_age} Días</div></div>', unsafe_allow_html=True)
 
-        # --- BLOQUE DE FILTROS ---
+        st.markdown("---")
+
+        # 3. BLOQUE DE FILTROS (Compacto)
         with st.container(border=True):
-            st.markdown("🔍 **Filtros de Búsqueda**")
+            st.markdown("🔍 **Herramientas de Filtrado**")
             col_f1, col_f2, col_f3 = st.columns(3)
+            
             lista_plantas = ["TODAS"] + sorted(df['planta'].unique().tolist())
             filtro_planta = col_f1.selectbox("Planta:", lista_plantas)
             
             df['fecha_llegada_dt'] = pd.to_datetime(df['fecha_llegada']).dt.date
             fechas_disponibles = sorted(df['fecha_llegada_dt'].unique())
             filtro_fecha = col_f2.selectbox("Fecha Llegada:", ["TODAS"] + [str(f) for f in fechas_disponibles])
+            
             filtro_lote = col_f3.text_input("Buscar Lote:", placeholder="Nro o ID...")
 
-        # --- APLICACIÓN DE FILTROS ---
+        # APLICACIÓN DE FILTROS
         df_filtrado = df.copy()
         if filtro_planta != "TODAS":
             df_filtrado = df_filtrado[df_filtrado['planta'] == filtro_planta]
@@ -342,30 +360,47 @@ elif choice == "Inventario Global":
             df_filtrado = df_filtrado[df_filtrado['lote_nro'].astype(str).str.contains(filtro_lote, case=False) | 
                                       df_filtrado['id_unico'].str.contains(filtro_lote, case=False)]
 
-        # --- LÓGICA DE SEMÁFORO (De la sección Seguimiento) ---
-        def color_semaforo(row):
-            # Rojo: Crítico (>10 días), Amarillo: Alerta (7-9), Verde: Óptimo
-            if row['Días Almacén'] > 10: return ['background-color: #ffcccc'] * len(row)
-            elif 7 <= row['Días Almacén'] <= 9: return ['background-color: #fff4cc'] * len(row)
-            else: return ['background-color: #d4edda'] * len(row)
+        # 4. REGLA DE SEMÁFORO (ESTILO)
+        def aplicar_estilo_seguimiento(row):
+            # Rojo: Crítico (>10), Amarillo: Alerta (7-9), Verde: Óptimo (0-6)
+            if row['Días Almacén'] > 10:
+                return ['background-color: #ffcccc'] * len(row) # Rojo suave
+            elif 7 <= row['Días Almacén'] <= 9:
+                return ['background-color: #fff4cc'] * len(row) # Amarillo suave
+            else:
+                return ['background-color: #d4edda'] * len(row) # Verde suave
 
-        # --- VISUALIZACIÓN ---
-        st.write(f"Mostrando **{len(df_filtrado)}** lotes en stock.")
+        # 5. TABLA DE DATOS DETALLADA
+        st.subheader("Detalle de Existencias")
         
-        # Mostramos la tabla con el estilo aplicado y la clasificación de repro
-        df_display = df_filtrado.drop(columns=['fecha_llegada_dt'])
-        st.dataframe(df_display.style.apply(color_semaforo, axis=1), use_container_width=True, hide_index=True)
+        # Ordenamos automáticamente para que lo más viejo salga arriba (First-In, First-Out)
+        df_display = df_filtrado.sort_values(by="Días Almacén", ascending=False).drop(columns=['fecha_llegada_dt'])
         
-        # Leyenda rápida
-        st.caption("🟢 0-6 días | 🟡 7-9 días | 🔴 >10 días (Priorizar salida)")
+        st.dataframe(
+            df_display.style.apply(aplicar_estilo_seguimiento, axis=1), 
+            use_container_width=True, 
+            hide_index=True
+        )
+        
+        # Leyenda de Colores (Para que el usuario sepa qué significan)
+        st.markdown("""
+            <div style="display: flex; gap: 20px; font-size: 12px; margin-top: 10px;">
+                <span>🟢 <b>Óptimo:</b> 0-6 días</span>
+                <span>🟡 <b>Alerta:</b> 7-9 días</span>
+                <span>🔴 <b>Prioridad Salida:</b> >10 días</span>
+            </div>
+        """, unsafe_allow_html=True)
 
-        # --- BOTÓN DE DESCARGA ---
+        # 6. ACCIONES (BOTÓN DE DESCARGA)
+        st.markdown("---")
         if st.download_button(
-            label="📊 DESCARGAR EXCEL FILTRADO",
+            label="📊 EXPORTAR REPORTE DE INVENTARIO",
             data=to_excel(df_display),
-            file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+            file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            use_container_width=False
         ):
-            st.toast("Descarga iniciada con éxito", icon="📥")
+            st.toast("Reporte generado con éxito", icon="📥")
+
     else:
         st.info("No hay lotes con saldo disponible.")
 # -------------------- SEGUIMIENTO Y DECISIONES --------------------
