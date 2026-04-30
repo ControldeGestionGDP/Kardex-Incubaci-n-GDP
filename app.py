@@ -295,18 +295,18 @@ if choice == "Recepción":
                         filas = df_actual[df_actual['id_unico'] == id_edit].index
             
                         if not filas.empty:
-                        fila_a_borrar = filas[0] + 2
-                        lotes_ws.delete_rows(int(fila_a_borrar))
+                            fila_a_borrar = filas[0] + 2
+                            lotes_ws.delete_rows(int(fila_a_borrar))
                 
-                        # --- NOTIFICACIÓN FLOTANTE ---
-                        st.toast(f"Registro {id_edit} eliminado correctamente", icon="⚠️")
+                            # --- NOTIFICACIÓN FLOTANTE ---
+                            st.toast(f"Registro {id_edit} eliminado correctamente", icon="⚠️")
                 
-                        # Pausa para que el usuario note la desaparición antes del rerun
-                        time.sleep(1.2)
-                        st.rerun()
-                else:
-                    # Si intenta borrar sin marcar el check, le avisamos con otro toast
-                    st.toast("Debes marcar la casilla de confirmación primero", icon="🚫")
+                            # Pausa para que el usuario note la desaparición antes del rerun
+                            time.sleep(1.2)
+                            st.rerun()
+                    else:
+                        # Si intenta borrar sin marcar el check, le avisamos con otro toast
+                        st.toast("Debes marcar la casilla de confirmación primero", icon="🚫")
 
 # -------------------- INVENTARIO --------------------
 elif choice == "Inventario Global":
