@@ -319,23 +319,50 @@ elif choice == "📊 Seguimiento & Decisiones":
 elif choice == "🔵 Salidas (Incubación)":
     st.header("Orden de Salida")
     df = cargar_lotes()
-    df = df[df["saldo"]>0]
+    df = df[df["saldo"] > 0]
+    
     if not df.empty:
+        # Usamos un contenedor para que el formulario sea dinámico
         with st.form("form_salida", clear_on_submit=True):
             id_s = st.selectbox("Seleccione Lote", df["id_unico"])
             cant = st.number_input("Cantidad", min_value=1)
-            mot = st.selectbox("Motivo", ["Carga Incubadora", "Venta", "Merma"])
+            
+            # Agregamos "Traslado entre Plantas" a las opciones
+            mot = st.selectbox("Motivo", ["Carga Incubadora", "Traslado entre Plantas", "Venta", "Merma"])
+            
+            # Lógica condicional: Si es traslado, preguntar a qué planta
+            planta_destino = ""
+            if mot == "Traslado entre Plantas":
+                planta_destino = st.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
+            
             if st.form_submit_button("🚀 PROCESAR SALIDA"):
-                lote_info = df[df["id_unico"]==id_s].iloc[0]
-                if cant<=lote_info['saldo']:
+                lote_info = df[df["id_unico"] == id_s].iloc[0]
+                
+                if cant <= lote_info['saldo']:
                     nuevo_saldo = lote_info['saldo'] - cant
+                    
+                    # 1. Actualizar el saldo en el lote original
                     actualizar_saldo(id_s, nuevo_saldo)
-                    insertar_movimiento(["", id_s, lote_info["planta"], "SALIDA", cant, mot, str(datetime.now())])
-                    st.success(f"Salida registrada: {cant} huevos de {id_s}")
+                    
+                    # 2. Definir el detalle del motivo para el historial
+                    detalle_motivo = mot
+                    if mot == "Traslado entre Plantas":
+                        detalle_motivo = f"Traslado a {planta_destino}"
+                    
+                    # 3. Insertar el movimiento de salida
+                    insertar_movimiento(["", id_s, lote_info["planta"], "SALIDA", cant, detalle_motivo, str(datetime.now())])
+                    
+                    # Opcional: Si es traslado, podrías insertar un "INGRESO" automático en la planta destino 
+                    # pero eso generaría un ID nuevo. Por ahora lo registramos como salida detallada.
+                    
+                    st.success(f"Salida procesada: {cant} unidades. Motivo: {detalle_motivo}")
                     lluvia_de_pollitos()
                     st.rerun()
-                else: st.error("Saldo insuficiente")
-
+                else:
+                    st.error("Saldo insuficiente en el lote seleccionado.")
+    else:
+        st.warning("No hay lotes con saldo disponible para procesar salidas.")
+        
 # -------------------- FICHA DE TRAZABILIDAD --------------------
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("Expediente de Lote")
