@@ -334,7 +334,7 @@ elif choice == "Inventario Global":
             fechas_disponibles = sorted(df['fecha_llegada_dt'].unique())
             filtro_fecha = col_f2.selectbox("Fecha Llegada:", ["TODAS"] + [str(f) for f in fechas_disponibles])
             
-            # Filtro por Lote (Texto libre)
+            # Filtro por Lote
             filtro_lote = col_f3.text_input("Buscar Lote:", placeholder="Nro o ID...")
 
         # --- APLICACIÓN DE FILTROS ---
@@ -347,31 +347,25 @@ elif choice == "Inventario Global":
             df_filtrado = df_filtrado[df_filtrado['fecha_llegada_dt'].astype(str) == filtro_fecha]
             
         if filtro_lote:
-            # Busca coincidencias parciales en Nro de Lote o ID Único
             df_filtrado = df_filtrado[
                 df_filtrado['lote_nro'].astype(str).str.contains(filtro_lote, case=False) | 
                 df_filtrado['id_unico'].str.contains(filtro_lote, case=False)
             ]
 
         # --- VISUALIZACIÓN ---
-        # Quitamos la columna auxiliar de fecha para mostrar la tabla limpia
         df_display = df_filtrado.drop(columns=['fecha_llegada_dt'])
         
         st.write(f"Mostrando **{len(df_display)}** registros encontrados.")
         st.dataframe(df_display, use_container_width=True, hide_index=True)
         
-        # --- BOTÓN DE DESCARGA (FLOTANTE EN SIDEBAR IZQUIERDO) ---
-        with st.sidebar:
-            st.markdown("---")
-            st.markdown("### 📥 Exportar Selección")
-            # El botón se genera dinámicamente con lo que esté filtrado en pantalla
-            st.download_button(
-                label="📊 DESCARGAR EXCEL",
-                data=to_excel(df_display),
-                file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                use_container_width=True
-            )
-            st.info("El archivo incluirá únicamente los registros visibles según los filtros aplicados.")
+        # --- BOTÓN DE DESCARGA (En su lugar original) ---
+        if st.download_button(
+            label="📊 DESCARGAR EXCEL FILTRADO",
+            data=to_excel(df_display),
+            file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        ):
+            # Notificación Flotante al descargar
+            st.toast("Descarga iniciada con éxito", icon="📥")
 
     else:
         st.info("No hay lotes con saldo disponible en este momento.")
