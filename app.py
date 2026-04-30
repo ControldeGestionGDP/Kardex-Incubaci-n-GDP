@@ -322,40 +322,38 @@ elif choice == "🔵 Salidas (Incubación)":
     df = df[df["saldo"] > 0]
     
     if not df.empty:
-        # Nota: Para que el despliegue sea instantáneo, el selectbox de Motivo 
-        # debe estar FUERA del formulario o usar bloques de estado. 
-        # Aquí lo optimizamos para que funcione dentro del flujo:
-        
-        with st.form("form_salida", clear_on_submit=True):
+        # Contenedor principal para la orden
+        with st.container(border=True):
+            # Colocamos estos campos fuera de un form interno para que sean reactivos
             id_s = st.selectbox("Seleccione Lote", df["id_unico"])
             cant = st.number_input("Cantidad", min_value=1)
-            
-            # El motivo define qué campos extra se muestran
             mot = st.selectbox("Motivo", ["Carga Incubadora", "Traslado entre Plantas", "Venta", "Merma"])
-            
-            # --- CAMPOS CONDICIONALES ---
+
+            # --- LÓGICA DINÁMICA (AQUÍ ESTÁ EL TRUCO) ---
             detalle_adicional = ""
             
             if mot == "Carga Incubadora":
-                nro_incubadora = st.text_input("N° de Incubadora", placeholder="Ej: INC-01")
-                detalle_adicional = f"INCUBADORA: {nro_incubadora}"
+                nro_inc = st.text_input("N° de Incubadora", placeholder="Ej: INC-01")
+                detalle_adicional = f"INCUBADORA: {nro_inc}"
                 
             elif mot == "Traslado entre Plantas":
-                p_destino = st.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
-                detalle_adicional = f"DESTINO: {p_destino}"
+                p_dest = st.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
+                detalle_adicional = f"A PLANTA: {p_dest}"
+
+            # Espacio visual
+            st.markdown("---")
             
-            # El botón de procesamiento
-            if st.form_submit_button("🚀 PROCESAR SALIDA"):
+            # Botón de acción (Fuera de un st.form para evitar el lag de actualización)
+            if st.button("🚀 PROCESAR SALIDA"):
                 lote_info = df[df["id_unico"] == id_s].iloc[0]
                 
                 if cant <= lote_info['saldo']:
-                    nuevo_saldo = lote_info['saldo'] - cant
+                    nuevo_saldo = int(lote_info['saldo'] - cant)
                     
-                    # Armamos el motivo final para el historial
-                    # Si hay detalle adicional lo sumamos, si no, queda el motivo simple
-                    motivo_historial = f"{mot} ({detalle_adicional})" if detalle_adicional else mot
+                    # Definimos el texto final que irá a la columna 'motivo' en Sheets
+                    motivo_final = f"{mot} ({detalle_adicional})" if detalle_adicional else mot
                     
-                    # 1. Actualizar Saldo en Sheets
+                    # 1. Actualizar Saldo
                     actualizar_saldo(id_s, nuevo_saldo)
                     
                     # 2. Registrar Movimiento
@@ -365,17 +363,17 @@ elif choice == "🔵 Salidas (Incubación)":
                         lote_info["planta"], 
                         "SALIDA", 
                         cant, 
-                        motivo_historial.upper(), 
+                        motivo_final.upper(), 
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     ])
                     
-                    st.success(f"Salida exitosa: {motivo_historial}")
+                    st.success(f"Éxito: {motivo_final}")
                     lluvia_de_pollitos()
                     st.rerun()
                 else:
-                    st.error("Error: La cantidad supera el saldo disponible.")
+                    st.error("No hay suficiente saldo para esta operación.")
     else:
-        st.info("No hay inventario disponible para realizar salidas.")
+        st.info("Inventario vacío.")
         
 # -------------------- FICHA DE TRAZABILIDAD --------------------
 elif choice == "🔍 Ficha de Trazabilidad":
