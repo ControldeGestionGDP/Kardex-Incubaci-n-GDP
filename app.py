@@ -343,8 +343,36 @@ elif choice == "🔍 Ficha de Trazabilidad":
 # -------------------- HISTORIAL GENERAL --------------------
 elif choice == "📜 Historial General":
     st.header("Auditoría de Movimientos")
-    h_df = cargar_movimientos()
+    
+    with st.spinner("Cargando historial desde el Hub..."):
+        h_df = cargar_movimientos()
+    
     if not h_df.empty:
-        st.dataframe(h_df, use_container_width=True)
+        # --- FILTROS DE AUDITORÍA ---
+        col_f1, col_f2 = st.columns([1, 2])
+        with col_f1:
+            tipos = ["Todos"] + h_df['tipo'].unique().tolist()
+            filtro_tipo = st.selectbox("Filtrar por movimiento:", tipos)
+        
+        # Aplicar filtro
+        df_mostrar = h_df.copy()
+        if filtro_tipo != "Todos":
+            df_mostrar = h_df[h_df['tipo'] == filtro_tipo]
+
+        # --- VISUALIZACIÓN ---
+        st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
+        
+        # --- ACCIONES ---
+        st.markdown(f"**Total de registros encontrados:** {len(df_mostrar)}")
+        
+        csv = df_mostrar.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 DESCARGAR AUDITORÍA (CSV)",
+            data=csv,
+            file_name=f"auditoria_movimientos_{datetime.now().strftime('%d_%m_%Y')}.csv",
+            mime='text/csv',
+        )
+    else:
+        st.info("No hay movimientos registrados para mostrar.")
 
 st.markdown('<div class="footer">Desarrollado por Gerencia de Control de Gestión</div>', unsafe_allow_html=True)
