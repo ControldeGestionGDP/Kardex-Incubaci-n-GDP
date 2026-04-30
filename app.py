@@ -322,18 +322,13 @@ elif choice == "🔵 Salidas (Incubación)":
     df = df[df["saldo"] > 0]
     
     if not df.empty:
-        # Usamos un contenedor para que el formulario sea dinámico
         with st.form("form_salida", clear_on_submit=True):
             id_s = st.selectbox("Seleccione Lote", df["id_unico"])
             cant = st.number_input("Cantidad", min_value=1)
-            
-            # Agregamos "Traslado entre Plantas" a las opciones
             mot = st.selectbox("Motivo", ["Carga Incubadora", "Traslado entre Plantas", "Venta", "Merma"])
             
-            # Lógica condicional: Si es traslado, preguntar a qué planta
-            planta_destino = ""
-            if mot == "Traslado entre Plantas":
-                planta_destino = st.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
+            # Selector de planta destino (solo visible si es traslado)
+            p_destino = st.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
             
             if st.form_submit_button("🚀 PROCESAR SALIDA"):
                 lote_info = df[df["id_unico"] == id_s].iloc[0]
@@ -341,27 +336,31 @@ elif choice == "🔵 Salidas (Incubación)":
                 if cant <= lote_info['saldo']:
                     nuevo_saldo = lote_info['saldo'] - cant
                     
-                    # 1. Actualizar el saldo en el lote original
+                    # --- LÓGICA DE TRASLADO ---
+                    if mot == "Traslado entre Plantas":
+                        detalle_final = f"TRASLADO A {p_destino.upper()}"
+                    else:
+                        detalle_final = mot
+                    
+                    # 1. Actualizar Saldo
                     actualizar_saldo(id_s, nuevo_saldo)
                     
-                    # 2. Definir el detalle del motivo para el historial
-                    detalle_motivo = mot
-                    if mot == "Traslado entre Plantas":
-                        detalle_motivo = f"Traslado a {planta_destino}"
+                    # 2. Registrar Movimiento con el detalle corregido
+                    insertar_movimiento([
+                        "", 
+                        id_s, 
+                        lote_info["planta"], 
+                        "SALIDA", 
+                        cant, 
+                        detalle_final, 
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    ])
                     
-                    # 3. Insertar el movimiento de salida
-                    insertar_movimiento(["", id_s, lote_info["planta"], "SALIDA", cant, detalle_motivo, str(datetime.now())])
-                    
-                    # Opcional: Si es traslado, podrías insertar un "INGRESO" automático en la planta destino 
-                    # pero eso generaría un ID nuevo. Por ahora lo registramos como salida detallada.
-                    
-                    st.success(f"Salida procesada: {cant} unidades. Motivo: {detalle_motivo}")
+                    st.success(f"Registrado: {cant} unidades con motivo: {detalle_final}")
                     lluvia_de_pollitos()
                     st.rerun()
                 else:
-                    st.error("Saldo insuficiente en el lote seleccionado.")
-    else:
-        st.warning("No hay lotes con saldo disponible para procesar salidas.")
+                    st.error("Saldo insuficiente")
         
 # -------------------- FICHA DE TRAZABILIDAD --------------------
 elif choice == "🔍 Ficha de Trazabilidad":
