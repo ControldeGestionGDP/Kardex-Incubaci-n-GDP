@@ -370,7 +370,7 @@ elif choice == "Inventario Global":
         def aplicar_estilo_seguimiento(row):
             if row['Días Almacén'] > 10:
                 return ['background-color: #ffcccc'] * len(row) # Rojo (Crítico)
-            elif 7 <= row['Días Almacén'] <= 9:
+            elif 8 <= row['Días Almacén'] <= 9:
                 return ['background-color: #fff4cc'] * len(row) # Amarillo (Alerta)
             else:
                 return ['background-color: #d4edda'] * len(row) # Verde (Óptimo)
@@ -390,8 +390,8 @@ elif choice == "Inventario Global":
         # Leyenda de Colores
         st.markdown("""
             <div style="display: flex; gap: 20px; font-size: 12px; margin-top: 10px;">
-                <span>🟢 <b>Óptimo:</b> 0-6 días</span>
-                <span>🟡 <b>Alerta:</b> 7-9 días</span>
+                <span>🟢 <b>Óptimo:</b> 0-7 días</span>
+                <span>🟡 <b>Alerta:</b> 8-9 días</span>
                 <span>🔴 <b>Prioridad Salida:</b> >10 días</span>
             </div>
         """, unsafe_allow_html=True)
