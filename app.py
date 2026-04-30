@@ -322,7 +322,7 @@ elif choice == "Inventario Global":
 
         # --- BLOQUE DE FILTROS ---
         with st.container(border=True):
-            st.subheader("🔍 Filtros de Búsqueda")
+            st.subheader("Filtros de Búsqueda")
             col_f1, col_f2, col_f3 = st.columns(3)
             
             # Filtro por Planta
@@ -363,7 +363,7 @@ elif choice == "Inventario Global":
         
         # Botón de descarga para los datos filtrados
         st.download_button(
-            label="📊 DESCARGAR EXCEL FILTRADO",
+            label="DESCARGAR EXCEL FILTRADO",
             data=to_excel(df_display),
             file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx"
         )
