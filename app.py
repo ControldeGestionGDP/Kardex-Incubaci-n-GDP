@@ -334,7 +334,7 @@ elif choice == "Inventario Global":
         m1, m2, m3 = st.columns(3)
         
         with m1:
-            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Unidades</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Huevos</div></div>', unsafe_allow_html=True)
         
         with m2:
             # Lógica dinámica para Lotes Críticos
