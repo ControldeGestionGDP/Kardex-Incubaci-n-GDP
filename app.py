@@ -280,7 +280,7 @@ if choice == "Recepción":
                             col_idx = headers.index(col_name) + 1
                             lotes_ws.update_cell(fila_idx, col_idx, str(val))
                     
-                    st.toast(f"Lote {id_edit} actualizado")
+                    st.toast(f"Lote {id_edit} actualizado", icon="🔃")
                     time.sleep(1)
                     st.rerun()
 
