@@ -157,7 +157,7 @@ if choice == "🟢 Recepción":
         with st.form("form_ingreso", clear_on_submit=True):
             col1, col2 = st.columns(2)
             lote_input = col1.text_input("Nro de Lote")
-            planta = col2.selectbox("Planta Destino", ["P.I. Tarapoto", "P.I. Pucacaca"])
+            planta = col2.selectbox("Planta Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
             
             c_desc = st.selectbox("Descripción del Producto", ["HUEVO INCUBABLE PREMIUM", "HUEVO INCUBABLE NO PREMIUM"])
             
