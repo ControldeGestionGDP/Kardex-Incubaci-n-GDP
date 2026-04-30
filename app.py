@@ -308,67 +308,66 @@ if choice == "Recepción":
                         # Si intenta borrar sin marcar el check, le avisamos con otro toast
                         st.toast("Debes marcar la casilla de confirmación primero", icon="🚫")
 
-# -------------------- INVENTARIO --------------------
+# -------------------- INVENTARIO GLOBAL (CON SEGUIMIENTO INTEGRADO) --------------------
 elif choice == "Inventario Global":
-    st.header("Consolidado de Stock")
+    st.header("Consolidado de Stock e Indicadores")
     
-    # 1. Cargar datos base
     df = cargar_lotes()
     
     if not df.empty:
-        # Filtrar solo lo que tiene stock
+        # 1. Preparación de datos (Cálculos de Seguimiento)
         df = df[df["saldo"] > 0].copy()
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
+        df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
 
         # --- BLOQUE DE FILTROS ---
         with st.container(border=True):
             st.markdown("🔍 **Filtros de Búsqueda**")
             col_f1, col_f2, col_f3 = st.columns(3)
-            
-            # Filtro por Planta
             lista_plantas = ["TODAS"] + sorted(df['planta'].unique().tolist())
             filtro_planta = col_f1.selectbox("Planta:", lista_plantas)
             
-            # Filtro por Fecha de Llegada
             df['fecha_llegada_dt'] = pd.to_datetime(df['fecha_llegada']).dt.date
             fechas_disponibles = sorted(df['fecha_llegada_dt'].unique())
             filtro_fecha = col_f2.selectbox("Fecha Llegada:", ["TODAS"] + [str(f) for f in fechas_disponibles])
-            
-            # Filtro por Lote
             filtro_lote = col_f3.text_input("Buscar Lote:", placeholder="Nro o ID...")
 
         # --- APLICACIÓN DE FILTROS ---
         df_filtrado = df.copy()
-
         if filtro_planta != "TODAS":
             df_filtrado = df_filtrado[df_filtrado['planta'] == filtro_planta]
-            
         if filtro_fecha != "TODAS":
             df_filtrado = df_filtrado[df_filtrado['fecha_llegada_dt'].astype(str) == filtro_fecha]
-            
         if filtro_lote:
-            df_filtrado = df_filtrado[
-                df_filtrado['lote_nro'].astype(str).str.contains(filtro_lote, case=False) | 
-                df_filtrado['id_unico'].str.contains(filtro_lote, case=False)
-            ]
+            df_filtrado = df_filtrado[df_filtrado['lote_nro'].astype(str).str.contains(filtro_lote, case=False) | 
+                                      df_filtrado['id_unico'].str.contains(filtro_lote, case=False)]
+
+        # --- LÓGICA DE SEMÁFORO (De la sección Seguimiento) ---
+        def color_semaforo(row):
+            # Rojo: Crítico (>10 días), Amarillo: Alerta (7-9), Verde: Óptimo
+            if row['Días Almacén'] > 10: return ['background-color: #ffcccc'] * len(row)
+            elif 7 <= row['Días Almacén'] <= 9: return ['background-color: #fff4cc'] * len(row)
+            else: return ['background-color: #d4edda'] * len(row)
 
         # --- VISUALIZACIÓN ---
+        st.write(f"Mostrando **{len(df_filtrado)}** lotes en stock.")
+        
+        # Mostramos la tabla con el estilo aplicado y la clasificación de repro
         df_display = df_filtrado.drop(columns=['fecha_llegada_dt'])
+        st.dataframe(df_display.style.apply(color_semaforo, axis=1), use_container_width=True, hide_index=True)
         
-        st.write(f"Mostrando **{len(df_display)}** registros encontrados.")
-        st.dataframe(df_display, use_container_width=True, hide_index=True)
-        
-        # --- BOTÓN DE DESCARGA (En su lugar original) ---
+        # Leyenda rápida
+        st.caption("🟢 0-6 días | 🟡 7-9 días | 🔴 >10 días (Priorizar salida)")
+
+        # --- BOTÓN DE DESCARGA ---
         if st.download_button(
             label="📊 DESCARGAR EXCEL FILTRADO",
             data=to_excel(df_display),
             file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx"
         ):
-            # Notificación Flotante al descargar
             st.toast("Descarga iniciada con éxito", icon="📥")
-
     else:
-        st.info("No hay lotes con saldo disponible en este momento.")
+        st.info("No hay lotes con saldo disponible.")
 # -------------------- SEGUIMIENTO Y DECISIONES --------------------
 elif choice == "Seguimiento & Decisiones":
     st.header("Seguimiento y Clasificación")
