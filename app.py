@@ -322,45 +322,60 @@ elif choice == "🔵 Salidas (Incubación)":
     df = df[df["saldo"] > 0]
     
     if not df.empty:
+        # Nota: Para que el despliegue sea instantáneo, el selectbox de Motivo 
+        # debe estar FUERA del formulario o usar bloques de estado. 
+        # Aquí lo optimizamos para que funcione dentro del flujo:
+        
         with st.form("form_salida", clear_on_submit=True):
             id_s = st.selectbox("Seleccione Lote", df["id_unico"])
             cant = st.number_input("Cantidad", min_value=1)
+            
+            # El motivo define qué campos extra se muestran
             mot = st.selectbox("Motivo", ["Carga Incubadora", "Traslado entre Plantas", "Venta", "Merma"])
             
-            # Selector de planta destino (solo visible si es traslado)
-            p_destino = st.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
+            # --- CAMPOS CONDICIONALES ---
+            detalle_adicional = ""
             
+            if mot == "Carga Incubadora":
+                nro_incubadora = st.text_input("N° de Incubadora", placeholder="Ej: INC-01")
+                detalle_adicional = f"INCUBADORA: {nro_incubadora}"
+                
+            elif mot == "Traslado entre Plantas":
+                p_destino = st.selectbox("Planta de Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
+                detalle_adicional = f"DESTINO: {p_destino}"
+            
+            # El botón de procesamiento
             if st.form_submit_button("🚀 PROCESAR SALIDA"):
                 lote_info = df[df["id_unico"] == id_s].iloc[0]
                 
                 if cant <= lote_info['saldo']:
                     nuevo_saldo = lote_info['saldo'] - cant
                     
-                    # --- LÓGICA DE TRASLADO ---
-                    if mot == "Traslado entre Plantas":
-                        detalle_final = f"TRASLADO A {p_destino.upper()}"
-                    else:
-                        detalle_final = mot
+                    # Armamos el motivo final para el historial
+                    # Si hay detalle adicional lo sumamos, si no, queda el motivo simple
+                    motivo_historial = f"{mot} ({detalle_adicional})" if detalle_adicional else mot
                     
-                    # 1. Actualizar Saldo
+                    # 1. Actualizar Saldo en Sheets
                     actualizar_saldo(id_s, nuevo_saldo)
                     
-                    # 2. Registrar Movimiento con el detalle corregido
+                    # 2. Registrar Movimiento
                     insertar_movimiento([
                         "", 
                         id_s, 
                         lote_info["planta"], 
                         "SALIDA", 
                         cant, 
-                        detalle_final, 
+                        motivo_historial.upper(), 
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     ])
                     
-                    st.success(f"Registrado: {cant} unidades con motivo: {detalle_final}")
+                    st.success(f"Salida exitosa: {motivo_historial}")
                     lluvia_de_pollitos()
                     st.rerun()
                 else:
-                    st.error("Saldo insuficiente")
+                    st.error("Error: La cantidad supera el saldo disponible.")
+    else:
+        st.info("No hay inventario disponible para realizar salidas.")
         
 # -------------------- FICHA DE TRAZABILIDAD --------------------
 elif choice == "🔍 Ficha de Trazabilidad":
