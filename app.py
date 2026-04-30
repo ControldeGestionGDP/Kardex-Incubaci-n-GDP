@@ -105,7 +105,6 @@ def actualizar_saldo(id_unico, nuevo_saldo):
     fila = df[df["id_unico"] == id_unico].index
     if len(fila) > 0:
         row_number = fila[0] + 2
-        # Buscamos el índice dinámico de la columna saldo por si la mueves
         col_index = df.columns.get_loc("saldo") + 1
         lotes_ws.update_cell(row_number, col_index, int(nuevo_saldo))
 
@@ -158,16 +157,15 @@ if choice == "🟢 Recepción":
             lote_input = col1.text_input("Nro de Lote")
             planta = col2.selectbox("Planta Destino", ["P.I. Tarapoto", "P.I. Pucacaca"])
             
-            c1, c2, c3 = st.columns(3)
-            granja = c1.text_input("Granja")
-            # --- AJUSTE 1: Nuevo campo Descripción ---
-            descripcion = c2.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"])
-            genetica = c3.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"])
+            c1, c2 = st.columns(2)
+            # --- GRANJA ELIMINADA ---
+            descripcion = c1.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"])
+            genetica = c2.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"])
             
-            c4, c5, c6 = st.columns(3)
-            edad_repro = c4.number_input("Edad Repro", min_value=0)
-            cant_h = c5.number_input("Cantidad", min_value=0)
-            f_postura = c6.date_input("Fecha Postura")
+            c3, c4, c5 = st.columns(3)
+            edad_repro = c3.number_input("Edad Repro", min_value=0)
+            cant_h = c4.number_input("Cantidad", min_value=0)
+            f_postura = c5.date_input("Fecha Postura")
             
             f_llegada = st.date_input("Fecha Llegada")
             obs = st.text_area("Notas Sanitarias")
@@ -177,11 +175,11 @@ if choice == "🟢 Recepción":
                     st.error("El número de lote es obligatorio")
                 else:
                     id_u, proc = generar_id_y_procedencia(lote_input)
-                    # --- AJUSTE 2: Insertar fila respetando la columna F ---
-                    # [id_u, lote, proc, planta, granja, descripcion, genetica, edad, posture, llegada, inicial, saldo, obs]
-                    insertar_lote([id_u, lote_input, proc, planta, granja, descripcion, genetica, edad_repro, str(f_postura), str(f_llegada), cant_h, cant_h, obs])
+                    # --- FILA AJUSTADA (Sin Granja) ---
+                    # [id_u, lote, proc, planta, descripcion, genetica, edad, posture, llegada, inicial, saldo, obs]
+                    insertar_lote([id_u, lote_input, proc, planta, descripcion, genetica, edad_repro, str(f_postura), str(f_llegada), cant_h, cant_h, obs])
                     insertar_movimiento(["", id_u, planta, "INGRESO", cant_h, f"Recepción: {descripcion}", str(datetime.now())])
-                    st.success(f"Lote {id_u} registrado correctamente")
+                    st.success(f"Lote {id_u} registrado")
                     lluvia_de_pollitos()
                     st.rerun()
     with t2:
@@ -192,9 +190,9 @@ if choice == "🟢 Recepción":
             datos = df_lotes[df_lotes["id_unico"]==id_edit].iloc[0]
             with st.form("f_edit"):
                 col_e1, col_e2 = st.columns(2)
-                e_granja = col_e1.text_input("Granja", value=datos['granja'])
-                # --- AJUSTE 3: Editar descripción ---
-                e_desc = col_e2.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"], index=0 if datos['descripcion']=="Huevo Incubable Premium" else 1)
+                # --- GRANJA ELIMINADA ---
+                e_desc = col_e1.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"], index=0 if datos['descripcion']=="Huevo Incubable Premium" else 1)
+                e_planta = col_e2.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca"], index=0 if datos['planta']=="P.I. Tarapoto" else 1)
                 
                 col_f1, col_f2 = st.columns(2)
                 e_f_postura = col_f1.date_input("Fecha Postura", value=pd.to_datetime(datos['fecha_postura']).date())
@@ -211,8 +209,7 @@ if choice == "🟢 Recepción":
                     headers = df_lotes.columns.tolist()
                     fila_idx = df_lotes[df_lotes['id_unico']==id_edit].index[0] + 2
                     update_dict = {
-                        'planta': datos.get('planta', 'P.I. Tarapoto'), # Mantiene la planta original
-                        'granja': e_granja,
+                        'planta': e_planta,
                         'descripcion': e_desc,
                         'linea_genetica': e_gen,
                         'edad_repro': e_edad,
@@ -225,7 +222,7 @@ if choice == "🟢 Recepción":
                         if col_name in headers:
                             col_idx = headers.index(col_name) + 1
                             lotes_ws.update_cell(fila_idx, col_idx, str(val))
-                    st.toast("Datos actualizados con éxito")
+                    st.toast("Datos actualizados")
                     st.rerun()
 
 # -------------------- INVENTARIO --------------------
@@ -235,10 +232,10 @@ elif choice == "🟡 Inventario Global":
     if not df.empty:
         df = df[df["saldo"]>0].copy()
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
-        # --- AJUSTE 4: Mostrar columna descripcion ---
-        cols_view = ['id_unico', 'lote_nro', 'granja', 'descripcion', 'planta', 'saldo', 'Días Almacén']
+        # --- GRANJA ELIMINADA DE LA VISTA ---
+        cols_view = ['id_unico', 'lote_nro', 'descripcion', 'planta', 'saldo', 'Días Almacén']
         st.dataframe(df[cols_view], use_container_width=True)
-        st.download_button("📥 DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario_Filtrado.xlsx")
+        st.download_button("📥 DESCARGAR EXCEL", to_excel(df), "Inventario_Filtrado.xlsx")
 
 # -------------------- SEGUIMIENTO Y DECISIONES --------------------
 elif choice == "📊 Seguimiento & Decisiones":
@@ -253,7 +250,9 @@ elif choice == "📊 Seguimiento & Decisiones":
             if row['Días'] > 10: return ['background-color: #ffcccc']*len(row)
             elif 7<=row['Días']<=9: return ['background-color: #fff4cc']*len(row)
             else: return ['background-color: #d4edda']*len(row)
-        st.dataframe(df.style.apply(color_semaforo, axis=1), use_container_width=True)
+        # --- GRANJA ELIMINADA DE LA VISTA ---
+        cols_viz = ['id_unico', 'descripcion', 'planta', 'Días', 'Clasif. Repro', 'saldo']
+        st.dataframe(df[cols_viz].style.apply(color_semaforo, axis=1), use_container_width=True)
 
 # -------------------- SALIDAS --------------------
 elif choice == "🔵 Salidas (Incubación)":
@@ -271,7 +270,7 @@ elif choice == "🔵 Salidas (Incubación)":
                     nuevo_saldo = lote_info['saldo'] - cant
                     actualizar_saldo(id_s, nuevo_saldo)
                     insertar_movimiento(["", id_s, lote_info["planta"], "SALIDA", cant, mot, str(datetime.now())])
-                    st.success(f"Salida registrada: {cant} huevos de {id_s}")
+                    st.success(f"Salida registrada")
                     lluvia_de_pollitos()
                     st.rerun()
                 else: st.error("Saldo insuficiente")
@@ -283,8 +282,6 @@ elif choice == "🔍 Ficha de Trazabilidad":
     target = st.selectbox("Buscar Lote:", ["Seleccionar..."] + df['id_unico'].tolist())
     if target != "Seleccionar...":
         info = df[df['id_unico']==target].iloc[0]
-        movs = cargar_movimientos()
-        movs = movs[movs['id_lote']==target].sort_values(by="fecha", ascending=False)
         st.subheader("Estado en Tiempo Real")
         m1,m2,m3,m4 = st.columns(4)
         with m1: st.markdown(f'<div class="info-card"><div class="info-label">Saldo en Cámara</div><div class="info-value">{info["saldo"]} Huevos</div></div>', unsafe_allow_html=True)
@@ -293,13 +290,15 @@ elif choice == "🔍 Ficha de Trazabilidad":
         with m4: st.markdown(f'<div class="info-card"><div class="info-label">Descripción</div><div class="info-value">{info["descripcion"]}</div></div>', unsafe_allow_html=True)
         
         st.subheader("Datos Técnicos de Producción")
-        c1,c2,c3,c4 = st.columns(4)
-        with c1: st.markdown(f'<div class="info-card"><div class="info-label">Granja</div><div class="info-value">{info["granja"]}</div></div>', unsafe_allow_html=True)
-        with c2: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
-        with c3: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
-        with c4: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
+        c1,c2,c3 = st.columns(3)
+        # --- GRANJA ELIMINADA DE AQUÍ TAMBIÉN ---
+        with c1: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
+        with c2: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
+        with c3: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
         st.warning(f" **Observaciones Sanitarias:** {info['obs_sanitarias']}")
         st.divider()
+        movs = cargar_movimientos()
+        movs = movs[movs['id_lote']==target].sort_values(by="fecha", ascending=False)
         st.dataframe(movs, use_container_width=True)
 
 # -------------------- HISTORIAL GENERAL --------------------
