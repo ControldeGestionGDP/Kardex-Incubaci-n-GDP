@@ -53,6 +53,7 @@ h1, h2, h3 { color: #07456a !important; font-family: 'Segoe UI', sans-serif; }
 }
 .sidebar-logo { font-size: 50px; text-align: center; margin-bottom: -10px; }
 
+/* Animación de pollitos */
 @keyframes falling {
     0% { transform: translateY(-10vh) translateX(0) rotate(0deg); opacity: 1; }
     100% { transform: translateY(100vh) translateX(20px) rotate(360deg); opacity: 0; }
@@ -151,17 +152,14 @@ choice = st.sidebar.radio("Navegación:", menu)
 # -------------------- RECEPCIÓN --------------------
 if choice == "🟢 Recepción":
     t1, t2 = st.tabs(["📥 Nuevo Ingreso", "✏️ Editar/Corregir"])
-    
     with t1:
         st.header("Registro de Ingresos")
         with st.form("form_ingreso", clear_on_submit=True):
             col1, col2 = st.columns(2)
             lote_input = col1.text_input("Nro de Lote")
-            # --- MODIFICADO: Agregado P.I. Loreto ---
             planta = col2.selectbox("Planta Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Loreto"])
             
             c1, c2 = st.columns(2)
-            # --- MODIFICADO: Agregada Descripción ---
             descripcion = c1.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"])
             genetica = c2.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"])
             
@@ -170,9 +168,7 @@ if choice == "🟢 Recepción":
             cant_h = c4.number_input("Cantidad", min_value=0)
             f_postura = c5.date_input("Fecha Postura")
             
-            c6 = st.columns(1)[0]
-            f_llegada = c6.date_input("Fecha Llegada")
-            
+            f_llegada = st.date_input("Fecha Llegada")
             obs = st.text_area("Notas Sanitarias")
             
             if st.form_submit_button("💾 GUARDAR REGISTRO"):
@@ -180,36 +176,31 @@ if choice == "🟢 Recepción":
                     st.error("El número de lote es obligatorio")
                 else:
                     id_u, proc = generar_id_y_procedencia(lote_input)
-                    # --- MODIFICADO: Se quitó 'granja' y se inserta 'descripcion' ---
-                    # Estructura sugerida: [id, lote, procedencia, planta, descripcion, genetica, edad, postura, llegada, cant, saldo, obs]
+                    # En la lista de inserción, usamos 'descripcion' en el lugar donde antes estaba 'granja'
                     insertar_lote([id_u, lote_input, proc, planta, descripcion, genetica, edad_repro, str(f_postura), str(f_llegada), cant_h, cant_h, obs])
-                    insertar_movimiento(["", id_u, planta, "INGRESO", cant_h, f"Recepción - {descripcion}", str(datetime.now())])
+                    insertar_movimiento(["", id_u, planta, "INGRESO", cant_h, f"Recepción: {descripcion}", str(datetime.now())])
                     st.success(f"Lote {id_u} registrado correctamente")
                     lluvia_de_pollitos()
                     st.rerun()
-
+                    
     with t2:
         st.header("Editor de Lotes")
         df_lotes = cargar_lotes()
         id_edit = st.selectbox("Seleccione ID:", ["Seleccionar..."] + df_lotes['id_unico'].tolist())
-        
         if id_edit != "Seleccionar...":
             datos = df_lotes[df_lotes["id_unico"]==id_edit].iloc[0]
             with st.form("f_edit"):
                 col_e1, col_e2 = st.columns(2)
-                # --- MODIFICADO: Agregada Descripción y actualizado Plantas ---
-                desc_options = ["Huevo Incubable Premium", "Huevo Incubable No Premium"]
-                e_desc = col_e1.selectbox("Descripción", desc_options, index=desc_options.index(datos['descripcion']) if 'descripcion' in datos and datos['descripcion'] in desc_options else 0)
-                
-                planta_options = ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Loreto"]
-                e_planta = col_e2.selectbox("Planta", planta_options, index=planta_options.index(datos['planta']) if datos['planta'] in planta_options else 0)
+                # Opciones actualizadas para Planta y nueva opción de Descripción
+                e_planta = col_e1.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Loreto"])
+                e_desc = col_e2.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"])
                 
                 col_f1, col_f2 = st.columns(2)
                 e_f_postura = col_f1.date_input("Fecha Postura", value=pd.to_datetime(datos['fecha_postura']).date())
                 e_f_llegada = col_f2.date_input("Fecha Llegada", value=pd.to_datetime(datos['fecha_llegada']).date())
                 
                 ce1, ce2, ce3 = st.columns(3)
-                e_gen = ce1.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"], index=["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"].index(datos['linea_genetica']))
+                e_gen = ce1.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"])
                 e_edad = ce2.number_input("Edad Repro", value=int(datos['edad_repro']))
                 e_saldo = ce3.number_input("Saldo", value=int(datos['saldo']))
                 
@@ -219,9 +210,10 @@ if choice == "🟢 Recepción":
                     headers = df_lotes.columns.tolist()
                     fila_idx = df_lotes[df_lotes['id_unico']==id_edit].index[0] + 2
                     
+                    # Actualizamos mapeando 'granja' a la nueva 'descripcion' para no romper el Sheets
                     update_dict = {
                         'planta': e_planta,
-                        'descripcion': e_desc, # Reemplaza el uso de granja en el diccionario
+                        'granja': e_desc,
                         'linea_genetica': e_gen,
                         'edad_repro': e_edad,
                         'fecha_postura': str(e_f_postura),
@@ -229,16 +221,14 @@ if choice == "🟢 Recepción":
                         'saldo': e_saldo,
                         'obs_sanitarias': e_obs
                     }
-                    
                     for col_name, val in update_dict.items():
                         if col_name in headers:
                             col_idx = headers.index(col_name) + 1
                             lotes_ws.update_cell(fila_idx, col_idx, str(val))
-                    
                     st.toast("Datos actualizados con éxito")
                     st.rerun()
 
-# --- EL RESTO DEL CÓDIGO SE MANTIENE IGUAL ---
+# -------------------- INVENTARIO --------------------
 elif choice == "🟡 Inventario Global":
     st.header("Consolidado de Stock")
     df = cargar_lotes()
@@ -248,6 +238,7 @@ elif choice == "🟡 Inventario Global":
         st.dataframe(df, use_container_width=True)
         st.download_button("📥 DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario_Filtrado.xlsx")
 
+# -------------------- SEGUIMIENTO Y DECISIONES --------------------
 elif choice == "📊 Seguimiento & Decisiones":
     st.header("Seguimiento y Clasificación")
     df = cargar_lotes()
@@ -262,11 +253,12 @@ elif choice == "📊 Seguimiento & Decisiones":
             else: return ['background-color: #d4edda']*len(row)
         st.dataframe(df.style.apply(color_semaforo, axis=1), use_container_width=True)
 
+# -------------------- SALIDAS --------------------
 elif choice == "🔵 Salidas (Incubación)":
     st.header("Orden de Salida")
     df = cargar_lotes()
+    df = df[df["saldo"]>0]
     if not df.empty:
-        df = df[df["saldo"]>0]
         with st.form("form_salida", clear_on_submit=True):
             id_s = st.selectbox("Seleccione Lote", df["id_unico"])
             cant = st.number_input("Cantidad", min_value=1)
@@ -282,6 +274,7 @@ elif choice == "🔵 Salidas (Incubación)":
                     st.rerun()
                 else: st.error("Saldo insuficiente")
 
+# -------------------- FICHA DE TRAZABILIDAD --------------------
 elif choice == "🔍 Ficha de Trazabilidad":
     st.header("Expediente de Lote")
     df = cargar_lotes()
@@ -296,17 +289,18 @@ elif choice == "🔍 Ficha de Trazabilidad":
         with m2: st.markdown(f'<div class="info-card"><div class="info-label">Equivalencia</div><div class="info-value">{round(info["saldo"]/360,1)} Cajas</div></div>', unsafe_allow_html=True)
         with m3: st.markdown(f'<div class="info-card"><div class="info-label">Días de Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])} Días</div></div>', unsafe_allow_html=True)
         with m4: st.markdown(f'<div class="info-card"><div class="info-label">Edad Repro</div><div class="info-value">{info["edad_repro"] if info["edad_repro"] else "S/D"} Sem.</div></div>', unsafe_allow_html=True)
-        
-        st.subheader("Datos Técnicos")
-        c1,c2,c3 = st.columns(3)
-        with c1: st.markdown(f'<div class="info-card"><div class="info-label">Descripción</div><div class="info-value">{info.get("descripcion", "S/D")}</div></div>', unsafe_allow_html=True)
+        st.subheader("Datos Técnicos de Producción")
+        c1,c2,c3,c4 = st.columns(4)
+        # Aquí 'granja' ahora muestra la 'Descripción' guardada
+        with c1: st.markdown(f'<div class="info-card"><div class="info-label">Descripción</div><div class="info-value">{info["granja"]}</div></div>', unsafe_allow_html=True)
         with c2: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
         with c3: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
-        
+        with c4: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
         st.warning(f" **Observaciones Sanitarias:** {info['obs_sanitarias']}")
         st.divider()
         st.dataframe(movs, use_container_width=True)
 
+# -------------------- HISTORIAL GENERAL --------------------
 elif choice == "📜 Historial General":
     st.header("Auditoría de Movimientos")
     h_df = cargar_movimientos()
