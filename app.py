@@ -174,30 +174,23 @@ if choice == "Recepción":
             
             obs = st.text_area("Notas Sanitarias")
             
+            # --- BOTÓN DE GUARDAR ---
             if st.form_submit_button("GUARDAR REGISTRO"):
                 if not lote_input:
                     st.error("El número de lote es obligatorio")
                 else:
-                    # Lógica de generación de ID
+                    # 1. Generar ID y datos
                     id_u, proc = generar_id_y_procedencia(lote_input)
                     
-                    # Inserción en Google Sheets
+                    # 2. Insertar en Google Sheets
                     insertar_lote([id_u, lote_input, proc, planta, granja, c_desc, genetica, edad_repro, str(f_postura), str(f_llegada), cant_h, cant_h, obs])
                     insertar_movimiento(["", id_u, planta, "INGRESO", cant_h, f"Recepción - {c_desc}", str(datetime.now())])
                     
-                    # --- NOTIFICACIÓN FLOTANTE (Sin lluvia de pollitos) ---
+                    # 3. Notificación Flotante (Toast) - SIN lluvia de pollitos
                     st.toast(f"Lote {id_u} registrado con éxito", icon="📥")
                     
-                    # Pequeña pausa para que el usuario vea el mensaje antes de que la página se refresque
+                    # 4. Breve espera y refresco
                     time.sleep(1)
-                    st.rerun()
-                else:
-                    id_u, proc = generar_id_y_procedencia(lote_input)
-                    # Se inserta siguiendo el orden: id_unico, lote_nro, procedencia, planta, granja, descripcion, linea_genetica, edad_repro, fecha_postura, fecha_llegada, cant_inicial, saldo, obs_sanitarias
-                    insertar_lote([id_u, lote_input, proc, planta, granja, c_desc, genetica, edad_repro, str(f_postura), str(f_llegada), cant_h, cant_h, obs])
-                    insertar_movimiento(["", id_u, planta, "INGRESO", cant_h, f"Recepción - {c_desc}", str(datetime.now())])
-                    st.success(f"Lote {id_u} registrado correctamente")
-                    lluvia_de_pollitos()
                     st.rerun()
     with t2:
         st.header("Editor de Lotes")
