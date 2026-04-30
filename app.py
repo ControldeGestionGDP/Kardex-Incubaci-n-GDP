@@ -380,6 +380,10 @@ elif choice == "Inventario Global":
         
         # Ordenamos por antigüedad para priorizar FIFO
         df_display = df_filtrado.sort_values(by="Días Almacén", ascending=False).drop(columns=['fecha_llegada_dt'])
+
+        # --- TRUCO PARA ENCABEZADOS EN NEGRITA ---
+        # Renombramos las columnas envolviéndolas en asteriscos (Markdown)
+        df_display.columns = [f"**{col.upper()}**" for col in df_display.columns]
         
         st.dataframe(
             df_display.style.apply(aplicar_estilo_seguimiento, axis=1), 
