@@ -312,33 +312,39 @@ if choice == "Recepción":
 elif choice == "Inventario Global":
     st.header("📊 Inteligencia de Inventario y Stock")
     
+    # 1. Cargar datos base
     df = cargar_lotes()
     
     if not df.empty:
-        # 1. Procesamiento de Reglas de Negocio
+        # 2. Procesamiento y Reglas de Negocio
         df = df[df["saldo"] > 0].copy()
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
         
-        # 2. KPIs RESUMEN (Lo que el CEO quiere ver primero)
-        # Esto reemplaza la necesidad de una sección aparte de "Decisiones"
+        # 3. KPIs RESUMEN (Cálculos de Control de Gestión)
         total_huevos = df['saldo'].sum()
         lotes_criticos = len(df[df['Días Almacén'] > 10])
         
+        # Cálculo del Promedio Ponderado de Almacenamiento (Realista según cantidades)
+        if total_huevos > 0:
+            avg_almacen = round((df['Días Almacén'] * df['saldo']).sum() / total_huevos, 1)
+        else:
+            avg_almacen = 0
+        
+        # Visualización de KPIs
         m1, m2, m3 = st.columns(3)
         with m1:
             st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Unidades</div></div>', unsafe_allow_html=True)
         with m2:
             st.markdown(f'<div class="info-card" style="border-left: 5px solid #ff4b4b;"><div class="info-label">Lotes Críticos (>10d)</div><div class="info-value">{lotes_criticos} Lotes</div></div>', unsafe_allow_html=True)
         with m3:
-            avg_age = round(df['Días Almacén'].mean(), 1) if not df.empty else 0
-            st.markdown(f'<div class="info-card" style="border-left: 5px solid #07456a;"><div class="info-label">Promedio Edad Stock</div><div class="info-value">{avg_age} Días</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-card" style="border-left: 5px solid #07456a;"><div class="info-label">Promedio Días Almacenamiento</div><div class="info-value">{avg_almacen} Días</div></div>', unsafe_allow_html=True)
 
         st.markdown("---")
 
-        # 3. BLOQUE DE FILTROS (Compacto)
+        # 4. BLOQUE DE FILTROS (Compacto y en Negrita)
         with st.container(border=True):
-            st.markdown("🔍 **Herramientas de Filtrado**")
+            st.markdown("🔍 **Filtros de Búsqueda**")
             col_f1, col_f2, col_f3 = st.columns(3)
             
             lista_plantas = ["TODAS"] + sorted(df['planta'].unique().tolist())
@@ -350,7 +356,7 @@ elif choice == "Inventario Global":
             
             filtro_lote = col_f3.text_input("Buscar Lote:", placeholder="Nro o ID...")
 
-        # APLICACIÓN DE FILTROS
+        # Aplicación de Filtros
         df_filtrado = df.copy()
         if filtro_planta != "TODAS":
             df_filtrado = df_filtrado[df_filtrado['planta'] == filtro_planta]
@@ -360,20 +366,19 @@ elif choice == "Inventario Global":
             df_filtrado = df_filtrado[df_filtrado['lote_nro'].astype(str).str.contains(filtro_lote, case=False) | 
                                       df_filtrado['id_unico'].str.contains(filtro_lote, case=False)]
 
-        # 4. REGLA DE SEMÁFORO (ESTILO)
+        # 5. REGLA DE SEMÁFORO (Visualización de Seguimiento)
         def aplicar_estilo_seguimiento(row):
-            # Rojo: Crítico (>10), Amarillo: Alerta (7-9), Verde: Óptimo (0-6)
             if row['Días Almacén'] > 10:
-                return ['background-color: #ffcccc'] * len(row) # Rojo suave
+                return ['background-color: #ffcccc'] * len(row) # Rojo (Crítico)
             elif 7 <= row['Días Almacén'] <= 9:
-                return ['background-color: #fff4cc'] * len(row) # Amarillo suave
+                return ['background-color: #fff4cc'] * len(row) # Amarillo (Alerta)
             else:
-                return ['background-color: #d4edda'] * len(row) # Verde suave
+                return ['background-color: #d4edda'] * len(row) # Verde (Óptimo)
 
-        # 5. TABLA DE DATOS DETALLADA
+        # 6. TABLA DE DATOS DETALLADA
         st.subheader("Detalle de Existencias")
         
-        # Ordenamos automáticamente para que lo más viejo salga arriba (First-In, First-Out)
+        # Ordenamos por antigüedad para priorizar FIFO
         df_display = df_filtrado.sort_values(by="Días Almacén", ascending=False).drop(columns=['fecha_llegada_dt'])
         
         st.dataframe(
@@ -382,7 +387,7 @@ elif choice == "Inventario Global":
             hide_index=True
         )
         
-        # Leyenda de Colores (Para que el usuario sepa qué significan)
+        # Leyenda de Colores
         st.markdown("""
             <div style="display: flex; gap: 20px; font-size: 12px; margin-top: 10px;">
                 <span>🟢 <b>Óptimo:</b> 0-6 días</span>
@@ -391,31 +396,17 @@ elif choice == "Inventario Global":
             </div>
         """, unsafe_allow_html=True)
 
-        # 6. ACCIONES (BOTÓN DE DESCARGA)
+        # 7. ACCIONES (Descarga con Notificación)
         st.markdown("---")
         if st.download_button(
             label="📊 EXPORTAR REPORTE DE INVENTARIO",
             data=to_excel(df_display),
-            file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            use_container_width=False
+            file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx"
         ):
             st.toast("Reporte generado con éxito", icon="📥")
 
     else:
         st.info("No hay lotes con saldo disponible.")
-# -------------------- SEGUIMIENTO Y DECISIONES --------------------
-elif choice == "Seguimiento & Decisiones":
-    st.header("Seguimiento y Clasificación")
-    df = cargar_lotes()
-    df = df[df["saldo"]>0]
-    df['Días'] = df['fecha_postura'].apply(calcular_dias)
-    df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
-    df = df.sort_values(by="Días", ascending=False)
-    def color_semaforo(row):
-        if row['Días'] > 10: return ['background-color: #ffcccc']*len(row)
-        elif 7<=row['Días']<=9: return ['background-color: #fff4cc']*len(row)
-        else: return ['background-color: #d4edda']*len(row)
-    st.dataframe(df.style.apply(color_semaforo, axis=1), use_container_width=True)
 
 # -------------------- SALIDAS --------------------
 elif choice == "Salidas (Incubación)":
