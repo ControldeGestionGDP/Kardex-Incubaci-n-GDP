@@ -187,25 +187,36 @@ if choice == "🟢 Recepción":
     with t2:
         st.header("Editor de Lotes")
         df_lotes = cargar_lotes()
-        id_edit = st.selectbox("Seleccione ID:", ["Seleccionar..."] + df_lotes['id_unico'].tolist())
+        
+        # Filtramos para no mostrar IDs vacíos
+        lista_ids = ["Seleccionar..."] + df_lotes['id_unico'].dropna().tolist()
+        id_edit = st.selectbox("Seleccione ID para modificar o eliminar:", lista_ids)
+        
         if id_edit != "Seleccionar...":
+            # Extraer datos del lote seleccionado
             datos = df_lotes[df_lotes["id_unico"]==id_edit].iloc[0]
+            
             with st.form("f_edit"):
                 col_e1, col_e2 = st.columns(2)
-                e_granja = col_e1.text_input("Granja", value=datos['granja'])
-                e_planta = col_e2.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca"], index=0 if datos['planta']=="P.I. Tarapoto" else 1)
                 
-                # Nueva columna descripcion en el editor
-                lista_desc = ["HUEVO INCUBABLE PREMIUM", "HUEVO INCUBABLE NO PREMIUM"]
-                idx_desc = lista_desc.index(datos['descripcion']) if 'descripcion' in datos and datos['descripcion'] in lista_desc else 0
-                e_desc = st.selectbox("Descripción", lista_desc, index=idx_desc)
+                # Opciones de descripción según tu requerimiento anterior
+                opciones_desc = ["HUEVO INCUBABLE PREMIUM", "HUEVO INCUBABLE NO PREMIUM"]
+                idx_desc = opciones_desc.index(datos['descripcion']) if datos['descripcion'] in opciones_desc else 0
+                
+                e_desc = col_e1.selectbox("Descripción", opciones_desc, index=idx_desc)
+                e_planta = col_e2.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca"], 
+                                           index=0 if datos['planta']=="P.I. Tarapoto" else 1)
                 
                 col_f1, col_f2 = st.columns(2)
                 e_f_postura = col_f1.date_input("Fecha Postura", value=pd.to_datetime(datos['fecha_postura']).date())
                 e_f_llegada = col_f2.date_input("Fecha Llegada", value=pd.to_datetime(datos['fecha_llegada']).date())
                 
                 ce1, ce2, ce3 = st.columns(3)
-                e_gen = ce1.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"], index=["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"].index(datos['linea_genetica']))
+                # Manejo de genética
+                opciones_gen = ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]
+                idx_gen = opciones_gen.index(datos['linea_genetica']) if datos['linea_genetica'] in opciones_gen else 3
+                
+                e_gen = ce1.selectbox("Genética", opciones_gen, index=idx_gen)
                 e_edad = ce2.number_input("Edad Repro", value=int(datos['edad_repro']))
                 e_saldo = ce3.number_input("Saldo", value=int(datos['saldo']))
                 
@@ -213,10 +224,11 @@ if choice == "🟢 Recepción":
                 
                 if st.form_submit_button("🔄 ACTUALIZAR DATOS"):
                     headers = df_lotes.columns.tolist()
+                    # Buscamos la fila real (index + 2 por el encabezado de Sheets)
                     fila_idx = df_lotes[df_lotes['id_unico']==id_edit].index[0] + 2
+                    
                     update_dict = {
                         'planta': e_planta,
-                        'granja': e_granja,
                         'descripcion': e_desc,
                         'linea_genetica': e_gen,
                         'edad_repro': e_edad,
@@ -225,12 +237,41 @@ if choice == "🟢 Recepción":
                         'saldo': e_saldo,
                         'obs_sanitarias': e_obs
                     }
+                    
+                    # Actualización segura
                     for col_name, val in update_dict.items():
                         if col_name in headers:
                             col_idx = headers.index(col_name) + 1
                             lotes_ws.update_cell(fila_idx, col_idx, str(val))
-                    st.toast("Datos actualizados con éxito")
+                    
+                    st.toast(f"Lote {id_edit} actualizado correctamente")
+                    time.sleep(1)
                     st.rerun()
+
+            # --- SECCIÓN DE ELIMINACIÓN SEGURA ---
+            st.markdown("---")
+            with st.expander("⚠️ ZONA DE PELIGRO - Borrar Registro"):
+                st.warning(f"¿Estás seguro de que deseas eliminar el lote **{id_edit}**? Esta acción es permanente.")
+                confirmar_check = st.checkbox("Confirmo que deseo borrar este registro permanentemente.")
+                
+                if st.button("🗑️ ELIMINAR INGRESO AHORA"):
+                    if confirmar_check:
+                        # Recargamos para asegurar que la fila no se haya movido
+                        df_actual = cargar_lotes()
+                        filas_encontradas = df_actual[df_actual['id_unico'] == id_edit].index
+                        
+                        if not filas_encontradas.empty:
+                            fila_a_borrar = filas_encontradas[0] + 2
+                            lotes_ws.delete_rows(int(fila_a_borrar))
+                            
+                            st.error(f"Registro {id_edit} eliminado.")
+                            lluvia_de_pollitos()
+                            time.sleep(1.5)
+                            st.rerun()
+                        else:
+                            st.error("Error: El registro ya no existe o el ID cambió.")
+                    else:
+                        st.info("Por favor, marca la casilla de confirmación para eliminar.")
 
 # -------------------- INVENTARIO --------------------
 elif choice == "🟡 Inventario Global":
