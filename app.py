@@ -310,7 +310,7 @@ if choice == "Recepción":
 
 # -------------------- INVENTARIO GLOBAL (VERSIÓN PRO) --------------------
 elif choice == "Inventario Global":
-    st.header("📊 Inteligencia de Inventario y Stock")
+    st.header("Inventario")
     
     df = cargar_lotes()
     
@@ -332,7 +332,7 @@ elif choice == "Inventario Global":
         
         m1, m2, m3 = st.columns(3)
         with m1:
-            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Unidades</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="info-card"><div class="info-label">Stock Total</div><div class="info-value">{total_huevos:,} Huevos</div></div>', unsafe_allow_html=True)
         with m2:
             st.markdown(f'<div class="info-card" style="border-left: 5px solid #ff4b4b;"><div class="info-label">Lotes Críticos (>10d)</div><div class="info-value">{lotes_criticos} Lotes</div></div>', unsafe_allow_html=True)
         with m3:
@@ -343,7 +343,7 @@ elif choice == "Inventario Global":
 
         # 3. FILTROS
         with st.container(border=True):
-            st.markdown("🔍 **Filtros de Búsqueda**")
+            st.markdown("**Filtros de Búsqueda**")
             col_f1, col_f2, col_f3 = st.columns(3)
             lista_plantas = ["TODAS"] + sorted(df['planta'].unique().tolist())
             filtro_planta = col_f1.selectbox("Planta:", lista_plantas)
@@ -395,7 +395,7 @@ elif choice == "Inventario Global":
         # 6. EXPORTACIÓN
         st.markdown("---")
         if st.download_button(
-            label="📊 EXPORTAR REPORTE DE INVENTARIO",
+            label="EXPORTAR REPORTE DE INVENTARIO",
             data=to_excel(df_display),
             file_name=f"Inventario_{filtro_planta}_{datetime.now().strftime('%Y%m%d')}.xlsx"
         ):
