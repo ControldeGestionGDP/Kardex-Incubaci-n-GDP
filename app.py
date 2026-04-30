@@ -146,12 +146,12 @@ def to_excel(df):
 # --- SIDEBAR ---
 st.sidebar.markdown('<div class="sidebar-logo">🐣</div>', unsafe_allow_html=True)
 st.sidebar.title("MENU ERP")
-menu = ["🟢 Recepción", "🟡 Inventario Global", "📊 Seguimiento & Decisiones", "🔵 Salidas (Incubación)", "🔍 Ficha de Trazabilidad", "📜 Historial General"]
+menu = ["Recepción", "Inventario Global", "Seguimiento & Decisiones", "Salidas (Incubación)", "Ficha de Trazabilidad", "Historial General"]
 choice = st.sidebar.radio("Navegación:", menu)
 
 # -------------------- RECEPCIÓN --------------------
-if choice == "🟢 Recepción":
-    t1, t2 = st.tabs(["📥 Nuevo Ingreso", "✏️ Editar/Corregir"])
+if choice == "Recepción":
+    t1, t2 = st.tabs(["Nuevo Ingreso", "Editar/Corregir"])
     with t1:
         st.header("Registro de Ingresos")
         with st.form("form_ingreso", clear_on_submit=True):
@@ -173,7 +173,7 @@ if choice == "🟢 Recepción":
             
             obs = st.text_area("Notas Sanitarias")
             
-            if st.form_submit_button("💾 GUARDAR REGISTRO"):
+            if st.form_submit_button("GUARDAR REGISTRO"):
                 if not lote_input:
                     st.error("El número de lote es obligatorio")
                 else:
@@ -250,7 +250,7 @@ if choice == "🟢 Recepción":
                 e_obs = st.text_area("Observaciones", value=str(datos.get('obs_sanitarias', '')))
                 
                 # EL BOTÓN DE SUBMIT (Indispensable para que el form funcione)
-                btn_update = st.form_submit_button("🔄 ACTUALIZAR DATOS")
+                btn_update = st.form_submit_button("ACTUALIZAR DATOS")
 
                 if btn_update:
                     headers = df_lotes.columns.tolist()
@@ -278,7 +278,7 @@ if choice == "🟢 Recepción":
 
             # --- ELIMINACIÓN ---
             st.markdown("---")
-            with st.expander("⚠️ ZONA DE PELIGRO - Borrar Registro"):
+            with st.expander("ZONA DE PELIGRO - Borrar Registro"):
                 confirmar_check = st.checkbox(f"Confirmo que deseo borrar permanentemente el lote {id_edit}")
                 if st.button("🗑️ ELIMINAR INGRESO AHORA"):
                     if confirmar_check:
@@ -292,17 +292,17 @@ if choice == "🟢 Recepción":
                             st.rerun()
 
 # -------------------- INVENTARIO --------------------
-elif choice == "🟡 Inventario Global":
+elif choice == "Inventario Global":
     st.header("Consolidado de Stock")
     df = cargar_lotes()
     if not df.empty:
         df = df[df["saldo"]>0]
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
         st.dataframe(df, use_container_width=True)
-        st.download_button("📥 DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario_Filtrado.xlsx")
+        st.download_button("DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario_Filtrado.xlsx")
 
 # -------------------- SEGUIMIENTO Y DECISIONES --------------------
-elif choice == "📊 Seguimiento & Decisiones":
+elif choice == "Seguimiento & Decisiones":
     st.header("Seguimiento y Clasificación")
     df = cargar_lotes()
     df = df[df["saldo"]>0]
@@ -316,7 +316,7 @@ elif choice == "📊 Seguimiento & Decisiones":
     st.dataframe(df.style.apply(color_semaforo, axis=1), use_container_width=True)
 
 # -------------------- SALIDAS --------------------
-elif choice == "🔵 Salidas (Incubación)":
+elif choice == "Salidas (Incubación)":
     st.header("Orden de Salida")
     df = cargar_lotes()
     df = df[df["saldo"] > 0]
@@ -344,7 +344,7 @@ elif choice == "🔵 Salidas (Incubación)":
             st.markdown("---")
             
             # Botón de acción (Fuera de un st.form para evitar el lag de actualización)
-            if st.button("🚀 PROCESAR SALIDA"):
+            if st.button("PROCESAR SALIDA"):
                 lote_info = df[df["id_unico"] == id_s].iloc[0]
                 
                 if cant <= lote_info['saldo']:
@@ -376,7 +376,7 @@ elif choice == "🔵 Salidas (Incubación)":
         st.info("Inventario vacío.")
         
 # -------------------- FICHA DE TRAZABILIDAD --------------------
-elif choice == "🔍 Ficha de Trazabilidad":
+elif choice == "Ficha de Trazabilidad":
     st.header("Expediente de Lote")
     df = cargar_lotes()
     target = st.selectbox("Buscar Lote:", ["Seleccionar..."] + df['id_unico'].tolist())
@@ -400,16 +400,16 @@ elif choice == "🔍 Ficha de Trazabilidad":
         st.divider()
         col_t1,col_t2 = st.columns([3,1])
         col_t1.subheader("Movimientos Registrados")
-        if col_t2.download_button("📥 EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx"):
+        if col_t2.download_button("EXPORTAR EXPEDIENTE", to_excel(movs), f"Expediente_{target}.xlsx"):
             st.toast(f"Reporte de {target} descargado")
         st.dataframe(movs, use_container_width=True)
 
 # -------------------- HISTORIAL GENERAL --------------------
-elif choice == "📜 Historial General":
+elif choice == "Historial General":
     st.header("Auditoría de Movimientos")
     h_df = cargar_movimientos()
     if not h_df.empty:
         st.dataframe(h_df, use_container_width=True)
-        st.download_button("📥 DESCARGAR AUDITORÍA", to_excel(h_df), "Auditoria.xlsx")
+        st.download_button("DESCARGAR AUDITORÍA", to_excel(h_df), "Auditoria.xlsx")
 
 st.markdown('<div class="footer">Desarrollado por Gerencia de Control de Gestión</div>', unsafe_allow_html=True)
