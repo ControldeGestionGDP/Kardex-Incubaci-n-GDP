@@ -288,16 +288,25 @@ if choice == "Recepción":
             st.markdown("---")
             with st.expander("ZONA DE PELIGRO - Borrar Registro"):
                 confirmar_check = st.checkbox(f"Confirmo que deseo borrar permanentemente el lote {id_edit}")
+    
                 if st.button("🗑️ ELIMINAR INGRESO AHORA"):
                     if confirmar_check:
                         df_actual = cargar_lotes()
                         filas = df_actual[df_actual['id_unico'] == id_edit].index
+            
                         if not filas.empty:
-                            fila_a_borrar = filas[0] + 2
-                            lotes_ws.delete_rows(int(fila_a_borrar))
-                            st.error("Registro eliminado.")
-                            time.sleep(1.5)
-                            st.rerun()
+                        fila_a_borrar = filas[0] + 2
+                        lotes_ws.delete_rows(int(fila_a_borrar))
+                
+                        # --- NOTIFICACIÓN FLOTANTE ---
+                        st.toast(f"Registro {id_edit} eliminado correctamente", icon="⚠️")
+                
+                        # Pausa para que el usuario note la desaparición antes del rerun
+                        time.sleep(1.2)
+                        st.rerun()
+                else:
+                    # Si intenta borrar sin marcar el check, le avisamos con otro toast
+                    st.toast("Debes marcar la casilla de confirmación primero", icon="🚫")
 
 # -------------------- INVENTARIO --------------------
 elif choice == "Inventario Global":
