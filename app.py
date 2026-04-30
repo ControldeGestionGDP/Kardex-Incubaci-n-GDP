@@ -176,7 +176,6 @@ if choice == "🟢 Recepción":
                     st.error("El número de lote es obligatorio")
                 else:
                     id_u, proc = generar_id_y_procedencia(lote_input)
-                    # En la lista de inserción, usamos 'descripcion' en el lugar donde antes estaba 'granja'
                     insertar_lote([id_u, lote_input, proc, planta, descripcion, genetica, edad_repro, str(f_postura), str(f_llegada), cant_h, cant_h, obs])
                     insertar_movimiento(["", id_u, planta, "INGRESO", cant_h, f"Recepción: {descripcion}", str(datetime.now())])
                     st.success(f"Lote {id_u} registrado correctamente")
@@ -191,7 +190,6 @@ if choice == "🟢 Recepción":
             datos = df_lotes[df_lotes["id_unico"]==id_edit].iloc[0]
             with st.form("f_edit"):
                 col_e1, col_e2 = st.columns(2)
-                # Opciones actualizadas para Planta y nueva opción de Descripción
                 e_planta = col_e1.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Loreto"])
                 e_desc = col_e2.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"])
                 
@@ -210,10 +208,9 @@ if choice == "🟢 Recepción":
                     headers = df_lotes.columns.tolist()
                     fila_idx = df_lotes[df_lotes['id_unico']==id_edit].index[0] + 2
                     
-                    # Actualizamos mapeando 'granja' a la nueva 'descripcion' para no romper el Sheets
                     update_dict = {
                         'planta': e_planta,
-                        'granja': e_desc,
+                        'granja': e_desc, # Mapeado a la columna granja física
                         'linea_genetica': e_gen,
                         'edad_repro': e_edad,
                         'fecha_postura': str(e_f_postura),
@@ -234,8 +231,13 @@ elif choice == "🟡 Inventario Global":
     df = cargar_lotes()
     if not df.empty:
         df = df[df["saldo"]>0]
+        # --- MODIFICACIÓN: Renombrar 'granja' a 'Descripción' para visualización ---
+        df = df.rename(columns={'granja': 'Descripción'})
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
-        st.dataframe(df, use_container_width=True)
+        
+        # Seleccionamos y ordenamos columnas para que se vea la Descripción
+        cols = ['id_unico', 'lote_nro', 'procedencia', 'planta', 'Descripción', 'linea_genetica', 'saldo', 'Días Almacén']
+        st.dataframe(df[cols], use_container_width=True)
         st.download_button("📥 DESCARGAR EXCEL FILTRADO", to_excel(df), "Inventario_Filtrado.xlsx")
 
 # -------------------- SEGUIMIENTO Y DECISIONES --------------------
@@ -244,14 +246,20 @@ elif choice == "📊 Seguimiento & Decisiones":
     df = cargar_lotes()
     if not df.empty:
         df = df[df["saldo"]>0]
+        # --- MODIFICACIÓN: Renombrar 'granja' a 'Descripción' para visualización ---
+        df = df.rename(columns={'granja': 'Descripción'})
         df['Días'] = df['fecha_postura'].apply(calcular_dias)
         df['Clasif. Repro'] = df['edad_repro'].apply(clasificar_repro)
         df = df.sort_values(by="Días", ascending=False)
+        
         def color_semaforo(row):
             if row['Días'] > 10: return ['background-color: #ffcccc']*len(row)
             elif 7<=row['Días']<=9: return ['background-color: #fff4cc']*len(row)
             else: return ['background-color: #d4edda']*len(row)
-        st.dataframe(df.style.apply(color_semaforo, axis=1), use_container_width=True)
+        
+        # Seleccionamos columnas incluyendo Descripción
+        cols_viz = ['id_unico', 'Descripción', 'planta', 'Días', 'Clasif. Repro', 'saldo']
+        st.dataframe(df[cols_viz].style.apply(color_semaforo, axis=1), use_container_width=True)
 
 # -------------------- SALIDAS --------------------
 elif choice == "🔵 Salidas (Incubación)":
@@ -289,9 +297,9 @@ elif choice == "🔍 Ficha de Trazabilidad":
         with m2: st.markdown(f'<div class="info-card"><div class="info-label">Equivalencia</div><div class="info-value">{round(info["saldo"]/360,1)} Cajas</div></div>', unsafe_allow_html=True)
         with m3: st.markdown(f'<div class="info-card"><div class="info-label">Días de Almacén</div><div class="info-value">{calcular_dias(info["fecha_postura"])} Días</div></div>', unsafe_allow_html=True)
         with m4: st.markdown(f'<div class="info-card"><div class="info-label">Edad Repro</div><div class="info-value">{info["edad_repro"] if info["edad_repro"] else "S/D"} Sem.</div></div>', unsafe_allow_html=True)
+        
         st.subheader("Datos Técnicos de Producción")
         c1,c2,c3,c4 = st.columns(4)
-        # Aquí 'granja' ahora muestra la 'Descripción' guardada
         with c1: st.markdown(f'<div class="info-card"><div class="info-label">Descripción</div><div class="info-value">{info["granja"]}</div></div>', unsafe_allow_html=True)
         with c2: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
         with c3: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
