@@ -155,10 +155,10 @@ if choice == "🟢 Recepción":
         with st.form("form_ingreso", clear_on_submit=True):
             col1, col2 = st.columns(2)
             lote_input = col1.text_input("Nro de Lote")
-            planta = col2.selectbox("Planta Destino", ["P.I. Tarapoto", "P.I. Pucacaca"])
+            # --- AJUSTE PLANTA DESTINO ---
+            planta = col2.selectbox("Planta Destino", ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"])
             
             c1, c2 = st.columns(2)
-            # --- GRANJA ELIMINADA ---
             descripcion = c1.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"])
             genetica = c2.selectbox("Genética", ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"])
             
@@ -175,8 +175,6 @@ if choice == "🟢 Recepción":
                     st.error("El número de lote es obligatorio")
                 else:
                     id_u, proc = generar_id_y_procedencia(lote_input)
-                    # --- FILA AJUSTADA (Sin Granja) ---
-                    # [id_u, lote, proc, planta, descripcion, genetica, edad, posture, llegada, inicial, saldo, obs]
                     insertar_lote([id_u, lote_input, proc, planta, descripcion, genetica, edad_repro, str(f_postura), str(f_llegada), cant_h, cant_h, obs])
                     insertar_movimiento(["", id_u, planta, "INGRESO", cant_h, f"Recepción: {descripcion}", str(datetime.now())])
                     st.success(f"Lote {id_u} registrado")
@@ -186,7 +184,6 @@ if choice == "🟢 Recepción":
         st.header("Editor de Lotes")
         df_lotes = cargar_lotes()
         
-        # Filtramos para no mostrar IDs vacíos si los hubiera
         lista_ids = ["Seleccionar..."] + df_lotes['id_unico'].dropna().tolist()
         id_edit = st.selectbox("Seleccione ID para modificar o eliminar:", lista_ids)
         
@@ -195,18 +192,18 @@ if choice == "🟢 Recepción":
             
             with st.form("f_edit"):
                 col_e1, col_e2 = st.columns(2)
-                # --- GRANJA ELIMINADA ---
                 e_desc = col_e1.selectbox("Descripción", ["Huevo Incubable Premium", "Huevo Incubable No Premium"], 
                                          index=0 if datos['descripcion']=="Huevo Incubable Premium" else 1)
-                e_planta = col_e2.selectbox("Planta", ["P.I. Tarapoto", "P.I. Pucacaca"], 
-                                           index=0 if datos['planta']=="P.I. Tarapoto" else 1)
+                # --- AJUSTE PLANTA EN EDITOR ---
+                opciones_planta = ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"]
+                idx_planta = opciones_planta.index(datos['planta']) if datos['planta'] in opciones_planta else 0
+                e_planta = col_e2.selectbox("Planta", opciones_planta, index=idx_planta)
                 
                 col_f1, col_f2 = st.columns(2)
                 e_f_postura = col_f1.date_input("Fecha Postura", value=pd.to_datetime(datos['fecha_postura']).date())
                 e_f_llegada = col_f2.date_input("Fecha Llegada", value=pd.to_datetime(datos['fecha_llegada']).date())
                 
                 ce1, ce2, ce3 = st.columns(3)
-                # Manejo de error si la genética no está en la lista predefinida
                 opciones_gen = ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]
                 idx_gen = opciones_gen.index(datos['linea_genetica']) if datos['linea_genetica'] in opciones_gen else 3
                 
@@ -229,7 +226,6 @@ if choice == "🟢 Recepción":
                         'saldo': e_saldo,
                         'obs_sanitarias': e_obs
                     }
-                    # Actualización celda por celda para mayor seguridad
                     for col_name, val in update_dict.items():
                         if col_name in headers:
                             col_idx = headers.index(col_name) + 1
@@ -239,15 +235,13 @@ if choice == "🟢 Recepción":
                     time.sleep(1)
                     st.rerun()
 
-            # --- SECCIÓN DE ELIMINACIÓN SEGURA ---
             st.markdown("---")
             with st.expander("⚠️ ZONA DE PELIGRO - Borrar Registro"):
-                st.warning(f"¿Estás seguro de que deseas eliminar el lote **{id_edit}**? Esta acción no se puede deshacer y eliminará la fila de la base de datos.")
+                st.warning(f"¿Estás seguro de que deseas eliminar el lote **{id_edit}**? Esta acción no se puede deshacer.")
                 confirmar_check = st.checkbox("Confirmo que deseo borrar este registro permanentemente.")
                 
                 if st.button("🗑️ ELIMINAR INGRESO AHORA"):
                     if confirmar_check:
-                        # Buscamos la fila nuevamente para asegurar precisión antes de borrar
                         df_actual = cargar_lotes()
                         filas_encontradas = df_actual[df_actual['id_unico'] == id_edit].index
                         
@@ -255,14 +249,14 @@ if choice == "🟢 Recepción":
                             fila_a_borrar = filas_encontradas[0] + 2
                             lotes_ws.delete_rows(int(fila_a_borrar))
                             
-                            st.error(f"Registro {id_edit} eliminado de la base de datos.")
+                            st.error(f"Registro {id_edit} eliminado.")
                             lluvia_de_pollitos()
                             time.sleep(1.5)
                             st.rerun()
                         else:
                             st.error("No se pudo encontrar el ID para borrar.")
                     else:
-                        st.info("Debes marcar la casilla de confirmación para poder eliminar.")
+                        st.info("Debes marcar la casilla de confirmación.")
 
 # -------------------- INVENTARIO --------------------
 elif choice == "🟡 Inventario Global":
@@ -271,7 +265,6 @@ elif choice == "🟡 Inventario Global":
     if not df.empty:
         df = df[df["saldo"]>0].copy()
         df['Días Almacén'] = df['fecha_postura'].apply(calcular_dias)
-        # --- GRANJA ELIMINADA DE LA VISTA ---
         cols_view = ['id_unico', 'lote_nro', 'descripcion', 'planta', 'saldo', 'Días Almacén']
         st.dataframe(df[cols_view], use_container_width=True)
         st.download_button("📥 DESCARGAR EXCEL", to_excel(df), "Inventario_Filtrado.xlsx")
@@ -289,7 +282,6 @@ elif choice == "📊 Seguimiento & Decisiones":
             if row['Días'] > 10: return ['background-color: #ffcccc']*len(row)
             elif 7<=row['Días']<=9: return ['background-color: #fff4cc']*len(row)
             else: return ['background-color: #d4edda']*len(row)
-        # --- GRANJA ELIMINADA DE LA VISTA ---
         cols_viz = ['id_unico', 'descripcion', 'planta', 'Días', 'Clasif. Repro', 'saldo']
         st.dataframe(df[cols_viz].style.apply(color_semaforo, axis=1), use_container_width=True)
 
@@ -330,7 +322,6 @@ elif choice == "🔍 Ficha de Trazabilidad":
         
         st.subheader("Datos Técnicos de Producción")
         c1,c2,c3 = st.columns(3)
-        # --- GRANJA ELIMINADA DE AQUÍ TAMBIÉN ---
         with c1: st.markdown(f'<div class="info-card"><div class="info-label">Línea Genética</div><div class="info-value">{info["linea_genetica"]}</div></div>', unsafe_allow_html=True)
         with c2: st.markdown(f'<div class="info-card"><div class="info-label">Procedencia</div><div class="info-value">{info["procedencia"]}</div></div>', unsafe_allow_html=True)
         with c3: st.markdown(f'<div class="info-card"><div class="info-label">Lote Externo</div><div class="info-value">{info["lote_nro"]}</div></div>', unsafe_allow_html=True)
@@ -343,28 +334,18 @@ elif choice == "🔍 Ficha de Trazabilidad":
 # -------------------- HISTORIAL GENERAL --------------------
 elif choice == "📜 Historial General":
     st.header("Auditoría de Movimientos")
-    
     with st.spinner("Cargando historial desde el Hub..."):
         h_df = cargar_movimientos()
-    
     if not h_df.empty:
-        # --- FILTROS DE AUDITORÍA ---
         col_f1, col_f2 = st.columns([1, 2])
         with col_f1:
             tipos = ["Todos"] + h_df['tipo'].unique().tolist()
             filtro_tipo = st.selectbox("Filtrar por movimiento:", tipos)
-        
-        # Aplicar filtro
         df_mostrar = h_df.copy()
         if filtro_tipo != "Todos":
             df_mostrar = h_df[h_df['tipo'] == filtro_tipo]
-
-        # --- VISUALIZACIÓN ---
         st.dataframe(df_mostrar, use_container_width=True, hide_index=True)
-        
-        # --- ACCIONES ---
         st.markdown(f"**Total de registros encontrados:** {len(df_mostrar)}")
-        
         csv = df_mostrar.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📥 DESCARGAR AUDITORÍA (CSV)",
