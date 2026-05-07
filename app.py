@@ -147,7 +147,7 @@ def to_excel(df):
 # --- SIDEBAR ---
 st.sidebar.markdown('<div class="sidebar-logo">🐣</div>', unsafe_allow_html=True)
 st.sidebar.title("MENU ERP")
-menu = ["Recepción", "Inventario Global", "Salidas (Incubación)", "Ficha de Trazabilidad", "Historial General"]
+menu = ["Recepción", "Inventario Global", "Orden de Salida", "Ficha de Trazabilidad", "Historial General"]
 choice = st.sidebar.radio("Navegación:", menu)
 
 # -------------------- RECEPCIÓN --------------------
@@ -416,7 +416,7 @@ elif choice == "Inventario Global":
     else:
         st.info("No hay lotes con saldo disponible.")
 # -------------------- SALIDAS --------------------
-elif choice == "Salidas (Incubación)":
+elif choice == "Orden de Salida":
     st.header("Orden de Salida")
     df = cargar_lotes()
     df = df[df["saldo"] > 0]
