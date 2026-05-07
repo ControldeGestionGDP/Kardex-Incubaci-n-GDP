@@ -147,7 +147,7 @@ def to_excel(df):
 # --- SIDEBAR ---
 st.sidebar.markdown('<div class="sidebar-logo">🐣</div>', unsafe_allow_html=True)
 st.sidebar.title("MENU ERP")
-menu = ["Recepción", "Inventario Global", "Seguimiento & Decisiones", "Salidas (Incubación)", "Ficha de Trazabilidad", "Historial General"]
+menu = ["Recepción", "Inventario Global", "Salidas (Incubación)", "Ficha de Trazabilidad", "Historial General"]
 choice = st.sidebar.radio("Navegación:", menu)
 
 # -------------------- RECEPCIÓN --------------------
