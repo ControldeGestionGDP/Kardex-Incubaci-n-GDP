@@ -1,18 +1,18 @@
-"""IncubaTrack | P.I. Pucacaca - Almacén de huevos incubables.
+"""IncubaTrack Regional 4.0 | Don Pollo
 
-Streamlit + Google Sheets (hojas nuevas separadas) y modo demo temporal.
-Importa el Excel «Control Almacen de HI DonPollo.xlsx» SIN alterar el archivo.
+Streamlit + un Google Sheets para Tarapoto, Pucacaca y Loreto.
+No utiliza SQL. No sobrescribe hojas antiguas: crea IT4_*.
 
-Regla de negocio: saldo = ingresos + sumatoria de movimientos firmados.
-Las clases OK / R / RR son independientes. Una carga es SALIDA de almacén;
-el paso incubadora -> nacedora no es un nuevo movimiento de almacén.
-
-LIMITACIÓN: Google Sheets no dispone de transacciones o bloqueo multiusuario.
-Para operación con varios operadores simultáneos se recomienda PostgreSQL.
+Integridad: movimientos inmutables, saldo derivado del kardex, escritura multihoja
+mediante Google Sheets spreadsheets.batchUpdate (appendCells), IDs idempotentes.
+LÍMITE: Sheets no ofrece bloqueo transaccional de stock entre operadores; para
+uso concurrente coordinar las cargas y hacer conciliaciones periódicas.
 """
 from __future__ import annotations
 
-import collections
+from collections import Counter, defaultdict
+from datetime import date, datetime, time as dt_time, timedelta
+from zoneinfo import ZoneInfo
 import hashlib
 import html
 import io
@@ -20,1136 +20,1334 @@ import re
 import uuid
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-except ImportError:
-    gspread = None
-    Credentials = None
+import gspread
+from google.oauth2.service_account import Credentials
 
 TZ = ZoneInfo("America/Lima")
-PLANTA = "P.I. Pucacaca"
-DESTINO = "P.I. Tarapoto"
-HI_POR_CAJA = 360
+SHEET_ID_DEFAULT = "13nw5vYfEFnP3RjHXK7CC7124-MDKCe-iAwfycvTUeS0"
+PLANTAS = {"TAR": "Tarapoto", "PUC": "Pucacaca", "LOR": "Loreto"}
 TIPOS_HI = ("OK", "R", "RR")
-TIPOS_MOV = ("CARGA", "TRANSFERENCIA", "BAJA", "AJUSTE +", "AJUSTE -")
-ORIGENES = ("Granja", "Transferencia recibida", "Saldo inicial", "Otro")
-NAMESPACE = uuid.UUID("e812b4ba-3c87-4ca5-a687-507555714918")
+HI_CAJA = 360
+NS = uuid.UUID("e812b4ba-3c87-4ca5-a687-507555714918")
 
-RECEPCION = [
-    "id_recepcion", "lote", "fecha_postura", "edad_repro", "tipo_hi",
-    "fecha_ingreso", "cantidad_hi", "ubicacion", "guia_recepcion", "origen",
-    "responsable", "observacion", "codigo_excel", "fila_excel", "creado_en", "importacion_id",
-]
-MOVIMIENTO = [
-    "id_movimiento", "id_operacion", "fecha_movimiento", "tipo", "id_recepcion",
-    "cantidad_hi", "variacion_hi", "incubadora", "destino", "documento",
-    "responsable", "causa", "observacion", "transportista", "placa",
-    "logtag", "creado_en", "importacion_id", "fila_excel",
-]
-CONTEO = [
-    "id_conteo", "fecha_conteo", "id_recepcion", "saldo_sistema",
-    "conteo_fisico", "diferencia", "documento", "responsable", "observacion", "creado_en",
-]
-CONFIRMACION = [
-    "id_confirmacion", "id_operacion", "fecha_recepcion", "recibidos_hi", "rechazados_hi",
-    "faltantes_hi", "documento", "responsable", "observacion", "creado_en",
-]
-SHEETS = {
-    "HI_PUC_Recepciones": RECEPCION,
-    "HI_PUC_Movimientos": MOVIMIENTO,
-    "HI_PUC_Conteos": CONTEO,
-    "HI_PUC_Confirmaciones": CONFIRMACION,
+TABLAS = {
+    "plantas": ("IT4_Plantas", ["id_planta", "nombre", "activo"]),
+    "almacenes": ("IT4_Almacenes", ["id_almacen", "id_planta", "nombre", "activo", "creado_en"]),
+    "maquinas": ("IT4_Maquinas", ["id_maquina", "id_planta", "nombre", "activo", "creado_en"]),
+    "partidas": ("IT4_Partidas", ["id_partida", "planta", "almacen", "ubicacion", "lote", "granja", "procedencia",
+        "tipo_hi", "fecha_postura", "edad_repro", "fecha_ingreso", "cantidad_inicial", "documento", "responsable",
+        "observacion", "origen", "id_partida_padre", "id_transferencia", "id_linea_transferencia",
+        "codigo_excel", "fila_excel", "importacion_id", "creado_en"]),
+    "movimientos": ("IT4_Movimientos", ["id_movimiento", "id_operacion", "fecha_movimiento", "planta", "almacen",
+        "id_partida", "tipo", "cantidad", "variacion", "id_maquina", "id_transferencia", "documento", "responsable",
+        "causa", "observacion", "importacion_id", "creado_en"]),
+    "transferencias": ("IT4_Transferencias", ["id_transferencia", "fecha_despacho", "planta_origen", "almacen_origen",
+        "planta_destino", "almacen_destino", "documento", "responsable", "transportista", "placa", "logtag", "observacion", "creado_en"]),
+    "lineas": ("IT4_Transfer_Detalle", ["id_linea", "id_transferencia", "id_partida_origen", "cantidad_enviada", "creado_en"]),
+    "confirmaciones": ("IT4_Transfer_Recepciones", ["id_confirmacion", "id_transferencia", "id_linea", "fecha_recepcion",
+        "cantidad_conforme", "cantidad_rechazada", "cantidad_faltante", "id_partida_destino", "documento", "responsable",
+        "observacion", "creado_en"]),
+    "conteos": ("IT4_Conteos", ["id_conteo", "fecha_conteo", "id_partida", "saldo_sistema", "conteo_fisico",
+        "diferencia", "documento", "responsable", "observacion", "creado_en"]),
+    "parametros": ("IT4_Parametros", ["id_parametro", "planta", "clave", "valor", "responsable", "creado_en"]),
 }
-MAP_SHEET = {"recepciones": "HI_PUC_Recepciones", "movimientos": "HI_PUC_Movimientos",
-             "conteos": "HI_PUC_Conteos", "confirmaciones": "HI_PUC_Confirmaciones"}
 
 
-def ahora() -> datetime:
+def now():
     return datetime.now(TZ)
 
 
-def timestamp() -> str:
-    return ahora().isoformat(timespec="seconds")
+def stamp():
+    return now().isoformat(timespec="seconds")
 
 
-def new_id(prefix: str) -> str:
-    return f"{prefix}-{ahora():%y%m%d}-{uuid.uuid4().hex[:10].upper()}"
+def uid(prefix):
+    return f"{prefix}-{now():%y%m%d}-{uuid.uuid4().hex[:12].upper()}"
 
 
-def i_num(v, default=0) -> int:
+def txt(value):
+    return str(value if value is not None else "").strip()
+
+
+def number(value, default=0):
+    """Lee conteos enteros aun si Sheets usa separadores regionales de miles."""
     try:
-        if v is None or str(v).strip() == "":
+        s = txt(value).replace("\u00a0", "").replace(" ", "")
+        if not s:
             return default
-        n = float(str(v).replace(",", ""))
-        if n != n or not n.is_integer():
-            return default
-        return int(n)
+        if re.fullmatch(r"[+-]?\d{1,3}(?:[.,]\d{3})+", s):
+            s = s.replace(".", "").replace(",", "")
+        elif re.fullmatch(r"[+-]?\d+[.,]0+", s):
+            s = re.split(r"[.,]", s)[0]
+        v = float(s)
+        return int(v) if v.is_integer() else default
     except (ValueError, TypeError, OverflowError):
         return default
 
 
-def plain(v) -> str:
-    return str(v if v is not None else "").strip()
+def fmt(n):
+    return f"{int(n):,}".replace(",", " ")
 
 
-def clean_lote(v) -> str:
-    s = plain(v)
-    if re.fullmatch(r"[0-9]+(?:\.0+)?", s):
-        return str(int(float(s)))
-    return s.upper()
-
-
-def date_iso(v) -> str:
-    if isinstance(v, datetime):
-        return v.date().isoformat()
-    if isinstance(v, date):
-        return v.isoformat()
-    s = plain(v)
+def parse_date(v):
     try:
-        return datetime.fromisoformat(s).date().isoformat()
-    except ValueError:
-        return s[:10]
-
-
-def parse_date(v) -> date | None:
-    try:
-        return date.fromisoformat(date_iso(v))
+        return date.fromisoformat(txt(v)[:10])
     except (ValueError, TypeError):
         return None
 
 
-def date_excel(v, mantener_hora=False) -> str:
+def parse_dt(v):
+    try:
+        return datetime.fromisoformat(txt(v)).replace(tzinfo=None)
+    except ValueError:
+        d = parse_date(v)
+        return datetime.combine(d, dt_time()) if d else None
+
+
+def source_id(v):
+    s = txt(v).upper()
+    return str(int(float(s))) if re.fullmatch(r"\d+(?:\.0+)?", s) else s
+
+
+def epoch_excel(v, preserve_time=False):
     if isinstance(v, (int, float)):
-        try:
-            fecha = datetime(1899, 12, 30) + timedelta(days=float(v))
-            if mantener_hora and fecha.time().hour + fecha.time().minute + fecha.time().second:
-                return fecha.isoformat(timespec="seconds")
-            return fecha.date().isoformat()
-        except (ValueError, OverflowError):
-            return ""
+        d = datetime(1899, 12, 30) + timedelta(days=float(v))
+        return d.isoformat(timespec="seconds") if preserve_time and d.time() != dt_time() else d.date().isoformat()
     if isinstance(v, str):
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        d = parse_dt(v)
+        if d:
+            return d.isoformat(timespec="seconds") if preserve_time and d.time() != dt_time() else d.date().isoformat()
+        for form in ("%d/%m/%Y", "%d-%m-%Y"):
             try:
-                return datetime.strptime(v.strip(), fmt).date().isoformat()
+                return datetime.strptime(v.strip(), form).date().isoformat()
             except ValueError:
                 pass
-        return date_iso(v)
     return ""
 
 
-def datetime_postura(v) -> datetime | None:
-    if isinstance(v, datetime):
-        return v.replace(tzinfo=None)
-    if isinstance(v, date):
-        return datetime.combine(v, datetime.min.time())
-    if not v:
-        return None
-    try:
-        return datetime.fromisoformat(str(v).strip()).replace(tzinfo=None)
-    except ValueError:
-        return None
+def label_partida(r):
+    return f"{r['lote']} · {r['tipo_hi']} · {r['fecha_postura'][:16]} · {fmt(r['saldo'])} HI · {r['id_partida'][-8:]}"
 
 
-def etiqueta_postura(v) -> str:
-    fecha = datetime_postura(v)
-    if fecha is None:
-        return plain(v)
-    return fecha.strftime("%Y-%m-%d %H:%M") if fecha.hour or fecha.minute else fecha.date().isoformat()
+def fields(kind, values):
+    cols = TABLAS[kind][1]
+    return {c: values.get(c, "") for c in cols}
 
 
-def num_format(v) -> str:
-    return f"{i_num(v):,}".replace(",", " ")
+def blank():
+    return {k: [] for k in TABLAS}
 
 
-def classify_age(edad: int, rules: tuple[int, int, int]) -> int:
-    return rules[0] if edad < 50 else (rules[1] if edad < 60 else rules[2])
-
-
-def inventario(recepciones: list[dict], movimientos: list[dict], corte: date,
-               reglas: tuple[int, int, int] = (7, 5, 3)) -> list[dict]:
-    """Inventario al corte, basado solo en eventos, sin escribir saldos."""
-    cambios = collections.defaultdict(int)
-    for m in movimientos:
-        fecha = parse_date(m.get("fecha_movimiento"))
-        if fecha and fecha <= corte:
-            cambios[plain(m.get("id_recepcion"))] += i_num(m.get("variacion_hi"))
-    salida = []
-    for r in recepciones:
-        fi = parse_date(r.get("fecha_ingreso"))
-        fp = datetime_postura(r.get("fecha_postura"))
-        if not fi or fi > corte:
-            continue
-        cantidad = i_num(r.get("cantidad_hi"))
-        saldo = cantidad + cambios.get(plain(r.get("id_recepcion")), 0)
-        edad = i_num(r.get("edad_repro"))
-        objetivo = classify_age(edad, reglas) if edad > 0 else None
-        dias = round((datetime.combine(corte, datetime.min.time()) - fp).total_seconds() / 86400, 2) if fp else None
-        faltan = objetivo - dias if objetivo is not None and dias is not None else None
-        estado = ("Sin saldo" if saldo == 0 else "Saldo negativo" if saldo < 0 else
-                  "Sin fecha" if faltan is None else
-                  "Objetivo superado" if faltan < 0 else
-                  "Cargar hoy" if faltan == 0 else
-                  "Próximo objetivo" if faltan <= 1 else "En plazo")
-        salida.append({
-            "id_recepcion": plain(r.get("id_recepcion")),
-            "lote": clean_lote(r.get("lote")),
-            "fecha_postura": plain(r.get("fecha_postura")),
-            "edad_repro": edad,
-            "tipo_hi": plain(r.get("tipo_hi")).upper(),
-            "fecha_ingreso": date_iso(r.get("fecha_ingreso")),
-            "guia_recepcion": plain(r.get("guia_recepcion")),
-            "ubicacion": plain(r.get("ubicacion")),
-            "origen": plain(r.get("origen")),
-            "responsable": plain(r.get("responsable")),
-            "codigo_excel": plain(r.get("codigo_excel")),
-            "ingresos_hi": cantidad,
-            "movimientos_hi": cambios.get(plain(r.get("id_recepcion")), 0),
-            "saldo_hi": saldo,
-            "cajas": max(0, saldo) // HI_POR_CAJA,
-            "adicionales": max(0, saldo) % HI_POR_CAJA,
-            "dias_postura": dias,
-            "objetivo_dias": objetivo,
-            "dias_restantes": faltan,
-            "estado": estado,
-        })
-    return salida
-
-
-def estadisticas(inventario_rows: list[dict], movimientos: list[dict], corte: date) -> dict:
-    r = inventario_rows
-    vistos = {x["id_recepcion"] for x in r}
-    mv = [m for m in movimientos if plain(m.get("id_recepcion")) in vistos and
-          (d := parse_date(m.get("fecha_movimiento"))) and d <= corte]
-    saldos = sum(x["saldo_hi"] for x in r)
-    return {
-        "ingresos": sum(x["ingresos_hi"] for x in r),
-        "saldo": saldos,
-        "cargados": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "CARGA"),
-        "transferidos": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "TRANSFERENCIA"),
-        "bajas": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "BAJA"),
-        "ajustes_mas": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "AJUSTE +"),
-        "ajustes_menos": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "AJUSTE -"),
-        "prioridad": sum(x["saldo_hi"] for x in r if x["saldo_hi"] > 0 and x["estado"] in ("Objetivo superado", "Cargar hoy", "Próximo objetivo")),
-        "grupos": sum(x["saldo_hi"] > 0 for x in r),
-        "cajas": max(0, saldos) // HI_POR_CAJA,
-        "adicionales": max(0, saldos) % HI_POR_CAJA,
-        "promedio_dias": round(sum(x["dias_postura"] * x["saldo_hi"] for x in r if x["dias_postura"] is not None and x["saldo_hi"] > 0) /
-                               sum(x["saldo_hi"] for x in r if x["saldo_hi"] > 0), 1) if any(x["saldo_hi"] > 0 for x in r) else 0,
-    }
-
-
-def validar_movimientos(nuevos: list[dict], registros: dict, corte: date) -> None:
-    if not nuevos:
-        raise ValueError("Seleccione cantidades superiores a cero.")
-    existentes = registros["movimientos"]
-    ids = {plain(m.get("id_movimiento")) for m in existentes}
-    if any(plain(m.get("id_movimiento")) in ids for m in nuevos):
-        raise ValueError("La operación ya fue registrada. Actualice la página para ver el resultado.")
-    totales = collections.defaultdict(int)
-    estado = {r["id_recepcion"]: r for r in inventario(registros["recepciones"], existentes, corte)}
-    for m in nuevos:
-        tipo = plain(m.get("tipo"))
-        cantidad = i_num(m.get("cantidad_hi"))
-        if tipo not in TIPOS_MOV or cantidad <= 0:
-            raise ValueError("Tipo de movimiento o cantidad inválida.")
-        if date_iso(m.get("fecha_movimiento")) != corte.isoformat():
-            raise ValueError("El movimiento debe validarse contra su fecha operativa.")
-        rid = plain(m.get("id_recepcion"))
-        if rid not in estado:
-            raise ValueError("La recepción no existe al corte de la operación.")
-        if not plain(m.get("documento")) or not plain(m.get("responsable")):
-            raise ValueError("El documento y el responsable son obligatorios.")
-        if tipo == "CARGA" and not plain(m.get("incubadora")):
-            raise ValueError("Indique la incubadora de cada carga.")
-        if tipo == "TRANSFERENCIA" and plain(m.get("destino")) != DESTINO:
-            raise ValueError("En esta etapa solo se registran transferencias a P.I. Tarapoto.")
-        if tipo in ("AJUSTE +", "AJUSTE -", "BAJA") and not plain(m.get("causa")):
-            raise ValueError("Los ajustes y bajas requieren un motivo o causa.")
-        variacion = cantidad if tipo == "AJUSTE +" else -cantidad
-        if i_num(m.get("variacion_hi")) != variacion:
-            raise ValueError("La variación no coincide con el tipo de operación.")
-        totales[rid] += variacion
-    for rid, delta in totales.items():
-        if estado[rid]["saldo_hi"] + delta < 0:
-            raise ValueError(f"Saldo insuficiente para lote {estado[rid]['lote']} / recepción {rid}.")
-    # También validar todos los saldos cronológicos posteriores: una operación
-    # retroactiva no debe dejar el almacén negativo tras cargas más recientes.
-    cambios = set(totales)
-    base = {r["id_recepcion"]: r for r in registros["recepciones"]
-            if plain(r.get("id_recepcion")) in cambios}
-    for rid in cambios:
-        rec = base.get(rid)
-        if not rec:
-            raise ValueError("No se encontró la recepción vinculada.")
-        balance = i_num(rec.get("cantidad_hi"))
-        fecha_ingreso = parse_date(rec.get("fecha_ingreso"))
-        por_dia = collections.defaultdict(int)
-        for m in existentes + nuevos:
-            if plain(m.get("id_recepcion")) != rid:
-                continue
-            d = parse_date(m.get("fecha_movimiento"))
-            if not d or (fecha_ingreso and d < fecha_ingreso):
-                raise ValueError("Existe un movimiento sin fecha válida o anterior a su recepción.")
-            por_dia[d] += i_num(m.get("variacion_hi"))
-        for fecha in sorted(por_dia):
-            balance += por_dia[fecha]
-            if balance < 0:
-                raise ValueError(f"Saldo insuficiente: el lote {estado[rid]['lote']} quedaría negativo al {fecha}.")
-
-
-def incidencias(registros: dict, inv_rows: list[dict]) -> list[dict]:
-    lista = []
-    ids = collections.Counter(plain(r.get("id_recepcion")) for r in registros["recepciones"])
-    codigos = collections.Counter(plain(r.get("codigo_excel")) for r in registros["recepciones"]
-                                  if plain(r.get("codigo_excel")))
-    for code, n in codigos.items():
-        if n > 1:
-            lista.append({"Severidad": "Revisar", "Área": "Recepciones", "Referencia": code,
-                          "Observación": f"Código histórico repetido en {n} recepciones; se conservaron con IDs independientes."})
-    for k, n in ids.items():
-        if n > 1:
-            lista.append({"Severidad": "Crítico", "Área": "Recepciones", "Referencia": k,
-                          "Observación": "ID interno duplicado; verificar escritura."})
-    recep_ids = {r["id_recepcion"] for r in inv_rows}
-    for m in registros["movimientos"]:
-        rid = plain(m.get("id_recepcion"))
-        referencia = plain(m.get("id_operacion")) or plain(m.get("id_movimiento"))
-        if rid not in {plain(r.get("id_recepcion")) for r in registros["recepciones"]}:
-            lista.append({"Severidad": "Crítico", "Área": "Movimientos", "Referencia": referencia, "Observación": "ID de recepción inexistente."})
-        if not plain(m.get("documento")):
-            lista.append({"Severidad": "Revisar", "Área": "Movimientos", "Referencia": referencia,
-                          "Observación": "Falta documento de movimiento."})
-        if plain(m.get("tipo")) == "CARGA" and not plain(m.get("incubadora")):
-            lista.append({"Severidad": "Revisar", "Área": "Cargas", "Referencia": referencia,
-                          "Observación": "Falta identificación de incubadora."})
-    for r in inv_rows:
-        if r["saldo_hi"] < 0:
-            lista.append({"Severidad": "Crítico", "Área": "Saldos", "Referencia": r["id_recepcion"],
-                          "Observación": "Saldo negativo."})
-    return lista
-
-
-# ─────────────── EXCEL: LECTURA DEL ARCHIVO SIN CAMBIOS ───────────────
-XML_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-
-
-def leer_filas_xlsx(contenido: bytes, nombre_hoja: str) -> list[dict]:
-    """Lee los valores cacheados de XLSX, incluidos ID calculados por fórmulas."""
-    with zipfile.ZipFile(io.BytesIO(contenido)) as z:
-        workbook = ET.fromstring(z.read("xl/workbook.xml"))
-        relaciones = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
-        targets = {x.attrib["Id"]: x.attrib["Target"] for x in relaciones}
-        sheet = next((x for x in workbook.iter(f"{{{XML_NS}}}sheet") if x.attrib.get("name") == nombre_hoja), None)
+def excel_xlsx_rows(content, sheet_name):
+    """Lee valores cacheados del Excel histórico sin macros/ejecución de fórmulas."""
+    xmlns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    relns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    with zipfile.ZipFile(io.BytesIO(content)) as z:
+        root = ET.fromstring(z.read("xl/workbook.xml"))
+        relroot = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        targets = {x.attrib["Id"]: x.attrib["Target"] for x in relroot}
+        sheet = next((x for x in root.iter(f"{{{xmlns}}}sheet") if x.get("name") == sheet_name), None)
         if sheet is None:
-            raise ValueError(f"La hoja requerida '{nombre_hoja}' no existe en el Excel.")
-        ident = sheet.attrib[f"{{{REL_NS}}}id"]
-        target = targets.get(ident, "")
+            raise ValueError(f"El Excel no contiene la hoja '{sheet_name}'.")
+        target = targets[sheet.attrib[f"{{{relns}}}id"]]
         path = target.lstrip("/") if target.startswith("/") else "xl/" + target
-        if ".." in path.split("/"):
-            raise ValueError("Ruta de hoja inválida.")
+        if ".." in path.split("/") or path not in z.namelist():
+            raise ValueError("Ruta XLSX no válida.")
         strings = []
         if "xl/sharedStrings.xml" in z.namelist():
-            string_root = ET.fromstring(z.read("xl/sharedStrings.xml"))
-            strings = ["".join(t.text or "" for t in si.iter(f"{{{XML_NS}}}t"))
-                       for si in string_root.findall(f"{{{XML_NS}}}si")]
-        xml = ET.fromstring(z.read(path))
-        resultado = []
-        for row in xml.findall(f".//{{{XML_NS}}}sheetData/{{{XML_NS}}}row"):
-            nr = int(row.attrib.get("r", "0"))
-            registro = {"_fila": nr}
-            for c in row.findall(f"{{{XML_NS}}}c"):
-                col = re.match(r"[A-Z]+", c.attrib.get("r", ""))
-                if not col:
+            sr = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            strings = ["".join(t.text or "" for t in el.iter(f"{{{xmlns}}}t")) for el in sr.findall(f"{{{xmlns}}}si")]
+        out = []
+        for row in ET.fromstring(z.read(path)).findall(f".//{{{xmlns}}}sheetData/{{{xmlns}}}row"):
+            d = {"_fila": int(row.get("r", 0))}
+            for c in row.findall(f"{{{xmlns}}}c"):
+                m = re.match(r"[A-Z]+", c.get("r", ""))
+                if not m:
                     continue
-                v = c.find(f"{{{XML_NS}}}v")
-                tipo = c.attrib.get("t", "")
+                v = c.find(f"{{{xmlns}}}v")
                 raw = v.text if v is not None else None
-                if tipo == "s" and raw is not None:
+                if c.get("t") == "s" and raw is not None:
                     raw = strings[int(raw)]
-                elif tipo == "inlineStr":
-                    raw = "".join(t.text or "" for t in c.iter(f"{{{XML_NS}}}t"))
-                elif tipo == "n" or not tipo:
-                    if raw is not None:
-                        try:
-                            raw = float(raw)
-                        except ValueError:
-                            pass
-                registro[col.group(0)] = raw
-            resultado.append(registro)
-        return resultado
+                elif c.get("t") == "inlineStr":
+                    raw = "".join(t.text or "" for t in c.iter(f"{{{xmlns}}}t"))
+                elif raw is not None and c.get("t") not in ("str", "e", "b"):
+                    try:
+                        raw = float(raw)
+                    except ValueError:
+                        pass
+                d[m.group()] = raw
+            out.append(d)
+        return out
 
 
-def preparar_importacion_excel(contenido: bytes) -> dict:
-    digest = hashlib.sha256(contenido).hexdigest()
-    batch_id = "XLSX-" + digest[:18].upper()
-    rows_r = leer_filas_xlsx(contenido, "Existencias")
-    rows_m = leer_filas_xlsx(contenido, "Movimientos")
-    rec, mov, pendientes = [], [], []
-    lookup = collections.defaultdict(list)
-    for r in rows_r:
-        if r["_fila"] < 10 or r["_fila"] > 439 or not clean_lote(r.get("B")):
+def import_excel_plan(blob):
+    """Importa SOLO el diseño de Excel validado de Pucacaca."""
+    digest = hashlib.sha256(blob).hexdigest()
+    batch = "XLSX-" + digest[:18].upper()
+    rr, mm = excel_xlsx_rows(blob, "Existencias"), excel_xlsx_rows(blob, "Movimientos")
+    parts, moves, issues = [], [], []
+    code_map = defaultdict(list)
+    for r in rr:
+        if not 10 <= r["_fila"] <= 439 or not source_id(r.get("B")):
             continue
-        cantidad = i_num(r.get("G"))
-        fp, fi = date_excel(r.get("C"), mantener_hora=True), date_excel(r.get("F"))
-        tipo = plain(r.get("E")).upper()
-        if cantidad <= 0 or not parse_date(fp) or not parse_date(fi) or tipo not in TIPOS_HI:
-            pendientes.append(f"Existencias fila {r['_fila']}: datos mínimos inválidos; no se importa.")
+        qty, kind = number(r.get("G")), txt(r.get("E")).upper()
+        date_in, posture = epoch_excel(r.get("F")), epoch_excel(r.get("C"), True)
+        if qty <= 0 or kind not in TIPOS_HI or not parse_date(date_in) or not parse_dt(posture):
+            issues.append(f"Existencias, fila {r['_fila']}: datos mínimos no válidos")
             continue
-        ident = "REC-" + str(uuid.uuid5(NAMESPACE, digest + ":R:" + str(r["_fila"]))).replace("-", "")[:20].upper()
-        codigo = plain(r.get("A"))
-        nuevo = dict(zip(RECEPCION, [
-            ident, clean_lote(r.get("B")), fp, i_num(r.get("D")), tipo,
-            fi, cantidad, plain(r.get("H")), plain(r.get("I")), plain(r.get("J")) or "Granja",
-            plain(r.get("K")), plain(r.get("L")), codigo, r["_fila"], timestamp(), batch_id,
-        ]))
-        rec.append(nuevo)
-        lookup[codigo].append(ident)
-    for m in rows_m:
-        if m["_fila"] < 10 or m["_fila"] > 1009 or not plain(m.get("B")):
+        pid = "PART-" + uuid.uuid5(NS, digest + ":P:" + str(r["_fila"])).hex[:20].upper()
+        doc = txt(r.get("I"))
+        part = fields("partidas", {
+            "id_partida": pid, "planta": "PUC", "almacen": "ALM-PUC", "ubicacion": txt(r.get("H")),
+            "lote": source_id(r.get("B")), "granja": "", "procedencia": txt(r.get("J")),
+            "tipo_hi": kind, "fecha_postura": posture, "edad_repro": number(r.get("D")),
+            "fecha_ingreso": date_in, "cantidad_inicial": qty, "documento": doc,
+            "responsable": txt(r.get("K")), "observacion": txt(r.get("L")), "origen": "EXCEL HISTÓRICO",
+            "codigo_excel": txt(r.get("A")), "fila_excel": r["_fila"], "importacion_id": batch,
+            "creado_en": stamp(),
+        })
+        parts.append(part)
+        code_map[txt(r.get("A"))].append(pid)
+        moves.append(fields("movimientos", {
+            "id_movimiento": "MOV-" + uuid.uuid5(NS, digest + ":I:" + str(r["_fila"])).hex[:20].upper(),
+            "id_operacion": "LEG-" + digest[:8].upper() + "-R" + str(r["_fila"]),
+            "fecha_movimiento": date_in, "planta": "PUC", "almacen": "ALM-PUC", "id_partida": pid,
+            "tipo": "INGRESO", "cantidad": qty, "variacion": qty, "documento": doc,
+            "responsable": txt(r.get("K")), "importacion_id": batch, "creado_en": stamp(),
+        }))
+    type_map = {"carga": "CARGA", "transferencia": "TRANSFERENCIA_HISTORICA", "baja": "BAJA",
+                "ajuste +": "AJUSTE +", "ajuste -": "AJUSTE -"}
+    for m in mm:
+        if not 10 <= m["_fila"] <= 1009 or not txt(m.get("B")):
             continue
-        codigo = plain(m.get("B"))
-        if len(lookup[codigo]) != 1:
-            pendientes.append(f"Movimientos fila {m['_fila']}: ID histórico ambiguo/inexistente ({codigo}); no se importa.")
+        ids = code_map.get(txt(m.get("B")), [])
+        kind = type_map.get(txt(m.get("C")).casefold())
+        qty, moved = number(m.get("D")), epoch_excel(m.get("A"))
+        if len(ids) != 1 or not kind or qty <= 0 or not parse_date(moved):
+            issues.append(f"Movimientos, fila {m['_fila']}: referencia ambigua o datos no válidos")
             continue
-        tipo_map = {"Carga": "CARGA", "Transferencia": "TRANSFERENCIA", "Baja": "BAJA",
-                    "Ajuste +": "AJUSTE +", "Ajuste -": "AJUSTE -"}
-        tipo = tipo_map.get(plain(m.get("C")))
-        cant, fm = i_num(m.get("D")), date_excel(m.get("A"))
-        if not tipo or cant <= 0 or not parse_date(fm):
-            pendientes.append(f"Movimientos fila {m['_fila']}: fecha, tipo o cantidad inválidos; no se importa.")
+        moves.append(fields("movimientos", {
+            "id_movimiento": "MOV-" + uuid.uuid5(NS, digest + ":M:" + str(m["_fila"])).hex[:20].upper(),
+            "id_operacion": "LEG-" + digest[:8].upper() + "-M" + str(m["_fila"]),
+            "fecha_movimiento": moved, "planta": "PUC", "almacen": "ALM-PUC", "id_partida": ids[0],
+            "tipo": kind, "cantidad": qty, "variacion": qty if kind == "AJUSTE +" else -qty,
+            "id_maquina": "", "documento": txt(m.get("L")), "responsable": txt(m.get("M")),
+            "causa": txt(m.get("R")), "observacion": txt(m.get("N")),
+            "importacion_id": batch, "creado_en": stamp(),
+        }))
+    duplicates = {c: n for c, n in Counter(p["codigo_excel"] for p in parts).items() if c and n > 1}
+    return {"partidas": parts, "movimientos": moves, "issues": issues, "duplicates": duplicates,
+            "batch": batch, "incoming": sum(number(p["cantidad_inicial"]) for p in parts),
+            "outgoing": sum(number(m["cantidad"]) for m in moves if m["tipo"] == "CARGA"),
+            "balance": sum(number(m["variacion"]) for m in moves)}
+
+def legacy_v31_plan(old_receipts, old_moves):
+    """Convierte hojas HI_PUC_* a IT4_* sin crear stock nuevo en destino por traslados antiguos."""
+    digest = hashlib.sha256(("|".join(x.get("id_recepcion", "") for x in old_receipts)
+                             + "|".join(x.get("id_movimiento", "") for x in old_moves)).encode()).hexdigest()
+    import_id = "V31-" + digest[:18].upper()
+    entries, movements, issues, old_ids = [], [], [], {}
+    for old in old_receipts:
+        key = txt(old.get("id_recepcion"))
+        qty = number(old.get("cantidad_hi"))
+        f = txt(old.get("fecha_ingreso"))
+        posture = txt(old.get("fecha_postura"))
+        if not key or key in old_ids or qty <= 0 or not parse_date(f) or not parse_dt(posture):
+            issues.append(f"Recepción {key or '(vacía)'}: ID duplicado o datos inválidos")
             continue
-        ref = "LEG-" + digest[:8].upper() + "-" + str(m["_fila"])
-        evt_id = "MOV-" + str(uuid.uuid5(NAMESPACE, digest + ":M:" + str(m["_fila"]))).replace("-", "")[:20].upper()
-        nuevo = dict(zip(MOVIMIENTO, [
-            evt_id, ref, fm, tipo, lookup[codigo][0], cant,
-            cant if tipo == "AJUSTE +" else -cant,
-            "", plain(m.get("Q")), plain(m.get("L")), plain(m.get("M")), plain(m.get("R")),
-            plain(m.get("N")), "", "", "", timestamp(), batch_id, m["_fila"],
-        ]))
-        mov.append(nuevo)
-    duplicados = {k: n for k, n in collections.Counter(r["codigo_excel"] for r in rec).items()
-                  if k and n > 1}
-    return {"recepciones": rec, "movimientos": mov, "pendientes": pendientes,
-            "duplicados": duplicados, "importacion_id": batch_id, "hash": digest}
+        if txt(old.get("tipo_hi")).upper() not in TIPOS_HI:
+            issues.append(f"Recepción {key}: tipo HI no reconocido")
+            continue
+        pid = "PART-" + uuid.uuid5(NS, "V31:" + key).hex[:20].upper()
+        old_ids[key] = pid
+        part = fields("partidas", {"id_partida": pid, "planta": "PUC", "almacen": "ALM-PUC",
+            "ubicacion": old.get("ubicacion", ""), "lote": source_id(old.get("lote")),
+            "granja": "", "procedencia": old.get("origen", ""),
+            "tipo_hi": txt(old.get("tipo_hi")).upper(), "fecha_postura": posture,
+            "edad_repro": number(old.get("edad_repro")), "fecha_ingreso": f,
+            "cantidad_inicial": qty, "documento": old.get("guia_recepcion", ""),
+            "responsable": old.get("responsable", ""), "observacion": old.get("observacion", ""),
+            "origen": "MIGRACIÓN V3.1", "codigo_excel": old.get("codigo_excel", ""),
+            "fila_excel": old.get("fila_excel", ""), "importacion_id": import_id,
+            "creado_en": old.get("creado_en") or stamp()})
+        entries.append(part)
+        movements.append(fields("movimientos", {
+            "id_movimiento": "MOV-" + uuid.uuid5(NS, "V31:ING:" + key).hex[:20].upper(),
+            "id_operacion": "MIG-" + key, "fecha_movimiento": f,
+            "planta": "PUC", "almacen": "ALM-PUC", "id_partida": pid,
+            "tipo": "INGRESO", "cantidad": qty, "variacion": qty,
+            "documento": part["documento"], "responsable": part["responsable"],
+            "importacion_id": import_id, "creado_en": stamp(),
+        }))
+    for old in old_moves:
+        key = txt(old.get("id_recepcion"))
+        pid = old_ids.get(key)
+        kind = txt(old.get("tipo")).upper()
+        if kind == "TRANSFERENCIA":
+            kind = "TRANSFERENCIA_HISTORICA"
+        qty, dt = number(old.get("cantidad_hi")), txt(old.get("fecha_movimiento"))
+        if not pid or kind not in ("CARGA", "TRANSFERENCIA_HISTORICA", "BAJA", "AJUSTE +", "AJUSTE -") or qty <= 0 or not parse_date(dt):
+            issues.append(f"Movimiento {old.get('id_movimiento', '')}: partida o campos inválidos")
+            continue
+        oid = txt(old.get("id_movimiento"))
+        if not oid:
+            issues.append("Movimiento sin ID original; no se importará automáticamente")
+            continue
+        movements.append(fields("movimientos", {
+            "id_movimiento": "MOV-" + uuid.uuid5(NS, "V31:EV:" + oid).hex[:20].upper(),
+            "id_operacion": "MIG-" + (txt(old.get("id_operacion")) or oid),
+            "fecha_movimiento": dt[:10], "planta": "PUC", "almacen": "ALM-PUC",
+            "id_partida": pid, "tipo": kind, "cantidad": qty,
+            "variacion": qty if kind == "AJUSTE +" else -qty,
+            "id_maquina": old.get("incubadora", ""), "documento": old.get("documento", ""),
+            "responsable": old.get("responsable", ""), "causa": old.get("causa", ""),
+            "observacion": old.get("observacion", ""),
+            "importacion_id": import_id, "creado_en": old.get("creado_en") or stamp(),
+        }))
+    test_data = blank()
+    test_data["partidas"], test_data["movimientos"] = entries, movements
+    if any(x["saldo"] < 0 for x in inventory(test_data, now().date())):
+        issues.append("Saldos negativos encontrados al conciliar versión 3.1")
+    return {"partidas": entries, "movimientos": movements, "issues": issues,
+            "incoming": sum(number(x["cantidad_inicial"]) for x in entries),
+            "balance": sum(number(x["variacion"]) for x in movements),
+            "importacion_id": import_id}
 
 
-# ───────────────────────────── Google Sheets ─────────────────────────────
-def tiene_secrets() -> bool:
+def read_legacy_v31():
+    book = workbook()
+    existing = {s.title for s in book.worksheets()}
+    names = ("HI_PUC_Recepciones", "HI_PUC_Movimientos")
+    if not all(n in existing for n in names):
+        return None
+    result = []
+    for name in names:
+        values = book.worksheet(name).get_all_values()
+        if not values:
+            result.append([])
+            continue
+        heads = values[0]
+        result.append([dict(zip(heads,row + [""]*(len(heads)-len(row)))) for row in values[1:]
+                       if any(txt(v) for v in row)])
+    return legacy_v31_plan(*result)
+
+
+# --------- Google Sheets: 10 hojas IT4_ separadas de datos anteriores ---------
+@st.cache_resource(show_spinner=False)
+def workbook():
     try:
-        return bool(st.secrets.get("gcp_service_account"))
-    except Exception:
-        return False
+        cfg = dict(st.secrets["gcp_service_account"])
+        book_id = txt(st.secrets.get("SPREADSHEET_ID") or SHEET_ID_DEFAULT)
+        cred = Credentials.from_service_account_info(cfg, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        return gspread.authorize(cred).open_by_key(book_id)
+    except KeyError as exc:
+        raise RuntimeError("Falta [gcp_service_account] en Secrets de Streamlit.") from exc
+    except Exception as exc:
+        raise RuntimeError(f"No se pudo abrir Google Sheets: {exc}") from exc
 
 
 @st.cache_resource(show_spinner=False)
-def libro_google():
-    if gspread is None or Credentials is None:
-        raise RuntimeError("Instale gspread y google-auth para usar Google Sheets.")
-    creds = Credentials.from_service_account_info(
-        dict(st.secrets["gcp_service_account"]),
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    key = st.secrets.get("SPREADSHEET_ID")
-    if not key:
-        raise ValueError("Falta SPREADSHEET_ID en secrets de Streamlit.")
-    return gspread.authorize(creds).open_by_key(key)
+def setup():
+    book = workbook()
+    sheets = {s.title: s for s in book.worksheets()}
+    for name, headers in TABLAS.values():
+        if name not in sheets:
+            w = book.add_worksheet(title=name, rows=3000, cols=len(headers))
+            w.append_row(headers, value_input_option="RAW")
+            sheets[name] = w
+        elif sheets[name].row_values(1) != headers:
+            raise RuntimeError(f"Los encabezados de '{name}' no coinciden con esta versión. No se modificarán.")
+    if len(sheets[TABLAS["plantas"][0]].get_all_values()) == 1:
+        batch_write({"plantas": [{"id_planta": code, "nombre": nombre, "activo": "SI"}
+                                 for code, nombre in PLANTAS.items()]}, book=book, sheet_map=sheets)
+    if len(sheets[TABLAS["almacenes"][0]].get_all_values()) == 1:
+        batch_write({"almacenes": [{"id_almacen": f"ALM-{code}", "id_planta": code,
+                         "nombre": "Almacén principal (provisional)", "activo": "SI", "creado_en": stamp()}
+                        for code in PLANTAS]}, book=book, sheet_map=sheets)
+    return True
 
 
-@st.cache_resource(show_spinner=False)
-def preparar_google():
-    libro = libro_google()
-    existentes = {s.title: s for s in libro.worksheets()}
-    for nombre, columnas in SHEETS.items():
-        if nombre not in existentes:
-            ws = libro.add_worksheet(nombre, rows=4000, cols=len(columnas))
-            ws.append_row(columnas, value_input_option="RAW")
-        elif existentes[nombre].row_values(1) != columnas:
-            raise ValueError(f"Encabezados incompatibles en {nombre}. No se modificarán automáticamente.")
+def cell_value(v):
+    if isinstance(v, bool):
+        return {"boolValue": v}
+    if isinstance(v, int):
+        return {"numberValue": v}
+    if isinstance(v, float):
+        return {"numberValue": v}
+    # stringValue: evita que IDs/documentos que comienzan con '=' se ejecuten como fórmulas
+    return {"stringValue": txt(v)}
 
 
-@st.cache_data(ttl=20, show_spinner=False)
-def leer_google() -> dict:
-    archivo = libro_google()
-    return {
-        clase: archivo.worksheet(nombre).get_all_records(default_blank="")
-        for clase, nombre in MAP_SHEET.items()
-    }
+def batch_write(groups, book=None, sheet_map=None):
+    """Un API batchUpdate: agregar filas en varias hojas en una sola solicitud."""
+    book = book or workbook()
+    sheet_map = sheet_map or {s.title: s for s in book.worksheets()}
+    requests = []
+    for kind, rows in groups.items():
+        if not rows:
+            continue
+        name, headers = TABLAS[kind]
+        values = [{"values": [{"userEnteredValue": cell_value(row.get(c, ""))} for c in headers]}
+                  for row in rows]
+        # Una solicitud por bloque; permite operaciones de varias pestañas conjuntamente.
+        requests.append({"appendCells": {"sheetId": sheet_map[name].id, "rows": values,
+                                          "fields": "userEnteredValue"}})
+    if requests:
+        book.batch_update({"requests": requests})
+        read_sheets.clear()
 
 
-def cargar_registros(fresco=False) -> dict:
-    if tiene_secrets():
-        if fresco:
-            leer_google.clear()
-        return leer_google()
-    if "datos_demo" not in st.session_state:
-        st.session_state["datos_demo"] = {k: [] for k in MAP_SHEET}
-    return st.session_state["datos_demo"]
+@st.cache_data(ttl=12, show_spinner=False)
+def read_sheets():
+    book = workbook()
+    result = blank()
+    for kind, (name, cols) in TABLAS.items():
+        values = book.worksheet(name).get_all_values()
+        if values:
+            result[kind] = [dict(zip(cols, (row + [""] * len(cols))[:len(cols)])) for row in values[1:]
+                            if any(txt(v) for v in row)]
+    return result
 
 
-def guardar_filas(clase: str, filas: list[dict]):
-    if not filas:
-        return
-    if tiene_secrets():
-        ws = libro_google().worksheet(MAP_SHEET[clase])
-        columnas = SHEETS[MAP_SHEET[clase]]
-        # No escribir fórmulas importadas ni actualizar saldos directamente.
-        for ini in range(0, len(filas), 125):
-            ws.append_rows([[fila.get(c, "") for c in columnas] for fila in filas[ini:ini+125]],
-                           value_input_option="RAW")
-        leer_google.clear()
-    else:
-        cargar_registros()[clase].extend(filas)
+def read_fresh():
+    read_sheets.clear()
+    return read_sheets()
 
 
-def migrar_archivo(importacion: dict) -> dict:
-    actuales = cargar_registros(fresco=True)
-    res = {}
-    for clase in ("recepciones", "movimientos"):
-        campo = "id_recepcion" if clase == "recepciones" else "id_movimiento"
-        guardados = {plain(row.get(campo)) for row in actuales[clase]}
-        nuevos = [r for r in importacion[clase] if r[campo] not in guardados]
-        guardar_filas(clase, nuevos)
-        res[clase] = len(nuevos)
-    return res
+def require_unique(data, key, field, value):
+    if any(txt(r.get(field)) == txt(value) for r in data[key]):
+        raise ValueError(f"Operación {value} ya registrada. Actualiza la pantalla.")
 
 
-def registrar_operacion(filas: list[dict], fecha: date):
-    actuales = cargar_registros(fresco=True)
-    validar_movimientos(filas, actuales, fecha)
-    guardar_filas("movimientos", filas)
+def pending_id(k, prefix="OP"):
+    key = "token_" + k
+    if key not in st.session_state:
+        st.session_state[key] = uid(prefix)
+    return st.session_state[key]
 
 
-def registrar_recepcion(fila: dict):
-    registros = cargar_registros(fresco=True)
-    duplicado = [r for r in registros["recepciones"] if
-                 clean_lote(r.get("lote")) == clean_lote(fila.get("lote")) and
-                 date_iso(r.get("fecha_postura")) == date_iso(fila.get("fecha_postura")) and
-                 plain(r.get("tipo_hi")) == plain(fila.get("tipo_hi")) and
-                 plain(r.get("guia_recepcion")).casefold() == plain(fila.get("guia_recepcion")).casefold()]
-    if duplicado:
-        raise ValueError("Ya existe una recepción del mismo lote, postura, clase y guía. Use un código de recepción distinto si corresponde a otra entrega.")
-    if any(plain(r.get("id_recepcion")) == fila["id_recepcion"] for r in registros["recepciones"]):
-        raise ValueError("Este ingreso ya fue registrado.")
-    guardar_filas("recepciones", [fila])
+def reset_id(k):
+    st.session_state.pop("token_" + k, None)
+    st.session_state["editor_version"] = st.session_state.get("editor_version", 0) + 1
+    read_sheets.clear()
 
 
-# ────────────────────────────── PRESENTACIÓN ──────────────────────────────
-STYLE = """
-<style>
-[data-testid="stAppViewContainer"]{background:#f6f8fb}
-.block-container{padding-top:1.05rem;padding-bottom:4rem;max-width:1570px}
-[data-testid="stSidebar"]{background:white;border-right:1px solid #e5eaf0}
-[data-testid="stSidebar"] .stRadio label{font-size:.88rem}
-[data-testid="stMetric"]{background:white;border:1px solid #e4eaf1;border-radius:15px;
-  padding:14px 17px 15px;box-shadow:0 3px 13px rgba(22,49,72,.035)}
-[data-testid="stMetricLabel"]{color:#697b8d;font-weight:600}
-[data-testid="stMetricValue"]{color:#193f5a;font-weight:750;letter-spacing:-.04em}
-div[data-testid="stVerticalBlockBorderWrapper"]>div{border-color:#e2e9f1;border-radius:14px}
-.stButton button{border-radius:10px;min-height:2.7rem;font-weight:600}
-.stButton button[kind="primary"],.stFormSubmitButton button[kind="primary"]{background:#df6b22;border:1px solid #df6b22;color:white}
-.stButton button[kind="primary"]:hover{background:#c85c17;border-color:#c85c17}
-.stTabs [data-baseweb="tab-list"]{gap:12px}
-.stTabs [data-baseweb="tab"]{border-radius:8px}
-h1,h2,h3{color:#1a3e59;letter-spacing:-.026em}
-h1{font-size:1.65rem !important}h2{font-size:1.24rem !important}
-.it-head{background:white;border:1px solid #e4eaf1;border-radius:16px;padding:20px 23px;
- display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:17px;
- border-top:4px solid #e47728}
-.it-kicker{font-size:.73rem;font-weight:800;letter-spacing:.095em;color:#cf6823;text-transform:uppercase}
-.it-title{font-size:1.58rem;line-height:1.22;font-weight:780;color:#173b55;letter-spacing:-.03em;margin:6px 0 5px}
-.it-sub{font-size:.88rem;color:#697b8b;line-height:1.45}
-.it-pill{background:#eaf4fb;color:#1e648b;border:1px solid #d6e8f3;
- border-radius:8px;font-size:.77rem;padding:7px 10px;font-weight:700;white-space:nowrap}
-.it-brand{border-radius:13px;border:1px solid #e4eaf1;background:#f6f8fa;padding:13px 14px;margin-bottom:17px}
-.it-brand strong{font-size:1.12rem;color:#163c58;letter-spacing:-.035em}
-.it-brand span{display:block;color:#778a9b;font-size:.73rem;margin-top:3px}
-.it-note{color:#75869a;font-size:.8rem;line-height:1.5}
-.it-overline{font-size:.72rem;letter-spacing:.08em;font-weight:800;text-transform:uppercase;color:#6c8296}
-.it-rule{border-left:3px solid #e47728;padding:7px 11px;background:#fff;border-radius:0 8px 8px 0;
- color:#576e81;font-size:.82rem}
-@media(max-width:760px){.it-head{display:block;padding:16px}.it-title{font-size:1.28rem}.it-pill{display:inline-block;margin-top:10px}}
-</style>
-"""
-
-
-def render_header(title: str, sub: str, corte: date, identificacion: str = "P.I. Pucacaca"):
-    st.markdown(
-        f'<div class="it-head"><div><div class="it-kicker">Control de almacén / huevos incubables</div>'
-        f'<div class="it-title">{html.escape(title)}</div>'
-        f'<div class="it-sub">{html.escape(sub)}</div></div>'
-        f'<div class="it-pill">{html.escape(identificacion)} · Corte {corte:%d/%m/%Y}</div></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def flash(mensaje: str):
-    st.session_state["flash"] = mensaje
-    if tiene_secrets():
-        leer_google.clear()
+def result(msg):
+    st.session_state["notice"] = msg
     st.rerun()
 
 
-def csv_bytes(filas: list[dict]) -> bytes:
-    return pd.DataFrame(filas).to_csv(index=False).encode("utf-8-sig")
+# ------------------ Kardex e inventarios, independientes de la UI ------------------
+def inventory(data, cutoff=None):
+    cutoff = cutoff or now().date()
+    variance = defaultdict(int)
+    for m in data["movimientos"]:
+        d = parse_date(m.get("fecha_movimiento"))
+        if d and d <= cutoff:
+            variance[txt(m.get("id_partida"))] += number(m.get("variacion"))
+    out = []
+    for r in data["partidas"]:
+        d = parse_date(r.get("fecha_ingreso"))
+        if d is None or d > cutoff:
+            continue
+        a = dict(r)
+        a["saldo"] = variance.get(txt(r.get("id_partida")), 0)
+        a["cantidad_inicial"] = number(r.get("cantidad_inicial"))
+        a["edad_repro"] = number(r.get("edad_repro"))
+        f = parse_dt(r.get("fecha_postura"))
+        a["dias_postura"] = round((datetime.combine(cutoff, dt_time()) - f).total_seconds() / 86400, 2) if f else None
+        out.append(a)
+    return out
 
 
-def tabla(filas: list[dict] | pd.DataFrame, height=360):
-    df = filas if isinstance(filas, pd.DataFrame) else pd.DataFrame(filas)
-    if df.empty:
-        st.info("No hay registros para los filtros seleccionados.")
+def limits(data, plant):
+    defaults = {"OBJ_MENOR_50": 7, "OBJ_50_59": 5, "OBJ_60_MAS": 3}
+    for p in data["parametros"]:
+        if p.get("planta") == plant and p.get("clave") in defaults:
+            n = number(p.get("valor"), -1)
+            if 0 < n <= 30:
+                defaults[p["clave"]] = n
+    return defaults
+
+
+def status(r, data):
+    if r["saldo"] <= 0:
+        return "Sin saldo" if r["saldo"] == 0 else "Saldo negativo"
+    if not r["edad_repro"] or r["dias_postura"] is None:
+        return "Sin datos"
+    p = limits(data, r["planta"])
+    limit = p["OBJ_MENOR_50"] if r["edad_repro"] < 50 else p["OBJ_50_59"] if r["edad_repro"] < 60 else p["OBJ_60_MAS"]
+    delta = limit - r["dias_postura"]
+    return "Objetivo superado" if delta < 0 else "Prioridad hoy" if delta <= 1 else "En plazo"
+
+
+def asof_options(data, plant, wh, cutoff, kind=None):
+    items = [r for r in inventory(data, cutoff) if r["planta"] == plant and r["almacen"] == wh and r["saldo"] > 0]
+    if kind and kind != "Todos":
+        items = [r for r in items if r["tipo_hi"] == kind]
+    return sorted(items, key=lambda r: (r["fecha_postura"], r["lote"]))
+
+
+def validate_deltas(data, new_rows):
+    """Valida stock al corte y posterior; también rechaza cronología negativa."""
+    current = {r["id_partida"]: r for r in data["partidas"]}
+    moves = defaultdict(list)
+    for m in data["movimientos"] + new_rows:
+        moves[txt(m.get("id_partida"))].append(m)
+    for rid in {txt(r["id_partida"]) for r in new_rows}:
+        part = current.get(rid)
+        if part is None:
+            raise ValueError("Partida inexistente o no confirmada.")
+        base = parse_date(part.get("fecha_ingreso"))
+        by_day = defaultdict(int)
+        for m in moves[rid]:
+            day = parse_date(m.get("fecha_movimiento"))
+            if not day or not base or day < base:
+                raise ValueError("Un movimiento no puede preceder a la recepción de la partida.")
+            by_day[day] += number(m.get("variacion"))
+        running = 0
+        for day in sorted(by_day):
+            running += by_day[day]
+            if running < 0:
+                raise ValueError(f"El saldo de la partida {rid[-8:]} sería negativo al {day}.")
+
+
+def chosen_lines(data, plant, wh, code):
+    opts = asof_options(data, plant, wh, now().date())
+    if not opts:
+        st.info("No hay partidas con existencias disponibles en este almacén.")
+        return []
+    table = pd.DataFrame([{"Partida ID": r["id_partida"], "Lote": r["lote"], "Clase": r["tipo_hi"],
+                           "Postura": r["fecha_postura"][:16], "Ubicación": r["ubicacion"],
+                           "Disponible": r["saldo"], "A utilizar": 0} for r in opts])
+    edited = st.data_editor(table, hide_index=True, use_container_width=True,
+        key=f"editor_{code}_{st.session_state.get('editor_version',0)}", height=min(500, 90 + len(opts) * 34),
+        disabled=["Partida ID", "Lote", "Clase", "Postura", "Ubicación", "Disponible"],
+        column_config={"Partida ID": st.column_config.TextColumn(width="small"),
+                       "A utilizar": st.column_config.NumberColumn(min_value=0, step=1),
+                       "Disponible": st.column_config.NumberColumn(format="%d")})
+    return [{"id_partida": txt(row["Partida ID"]), "cantidad": number(row["A utilizar"]),
+             "disponible": number(row["Disponible"])}
+            for _, row in edited.iterrows() if number(row["A utilizar"]) > 0]
+
+
+def validate_lines(lines):
+    if not lines:
+        raise ValueError("Selecciona al menos una cantidad mayor a cero.")
+    if any(x["cantidad"] <= 0 or x["cantidad"] > x["disponible"] for x in lines):
+        raise ValueError("Hay cantidades que exceden el saldo disponible.")
+    if len({x["id_partida"] for x in lines}) != len(lines):
+        raise ValueError("No se permite repetir una partida en la misma operación.")
+
+
+def make_mov(op, part, kind, qty, d, doc, operator, machine="", transfer="", cause="", obs="", mid=""):
+    return fields("movimientos", {"id_movimiento": mid or uid("MOV"), "id_operacion": op,
+       "fecha_movimiento": d.isoformat() if isinstance(d, date) else d,
+       "planta": part["planta"], "almacen": part["almacen"], "id_partida": part["id_partida"],
+       "tipo": kind, "cantidad": qty, "variacion": qty if kind in ("INGRESO", "AJUSTE +") else -qty,
+       "id_maquina": machine, "id_transferencia": transfer, "documento": doc, "responsable": operator,
+       "causa": cause, "observacion": obs, "creado_en": stamp()})
+
+
+def commit_consumption(kind, code, lines, plant, wh, date_op, document, operator, machine="", dest="", cause="", obs=""):
+    validate_lines(lines)
+    if not txt(document) or not txt(operator):
+        raise ValueError("El documento y el responsable son obligatorios.")
+    if date_op > now().date():
+        raise ValueError("No es posible registrar operaciones con fecha futura.")
+    data = read_fresh()
+    operation = pending_id(code)
+    require_unique(data, "movimientos", "id_operacion", operation)
+    lookup = {r["id_partida"]: r for r in data["partidas"]}
+    rows = []
+    for item in lines:
+        p = lookup.get(item["id_partida"])
+        if not p or p["planta"] != plant or p["almacen"] != wh:
+            raise ValueError("Una partida ya no pertenece a este almacén.")
+        rows.append(make_mov(operation, p, kind, item["cantidad"], date_op, document, operator,
+                             machine=machine, cause=cause, obs=obs))
+    validate_deltas(data, rows)
+    batch_write({"movimientos": rows})
+    reset_id(code)
+    result(f"{kind}: {fmt(sum(x['cantidad'] for x in lines))} HI registrados en {PLANTAS[plant]}.")
+
+
+# -------------------- Estilos, navegación y componentes --------------------
+st.set_page_config(page_title="IncubaTrack Regional | Don Pollo", page_icon="🥚", layout="wide", initial_sidebar_state="expanded")
+st.markdown("""
+<style>
+[data-testid="stAppViewContainer"] {background: #f6f8fb;}
+.block-container {max-width: 1580px; padding-top: 1.1rem; padding-bottom: 4rem;}
+[data-testid="stSidebar"] {background:#fff; border-right:1px solid #e4eaf1;}
+[data-testid="stSidebar"] .stRadio [data-testid="stWidgetLabel"] {display:none;}
+[data-testid="stMetric"] {background:#fff; border:1px solid #e4eaf1; border-top:4px solid #147cba; border-radius:12px; padding:14px 17px; box-shadow:0 5px 22px rgba(22,52,82,.035);}
+[data-testid="stMetricLabel"] {color:#5c7087; font-weight:650;}
+[data-testid="stMetricValue"] {color:#173c58; letter-spacing:-.035em;}
+.stButton button,.stFormSubmitButton button {border-radius:9px; min-height:2.55rem; font-weight:650;}
+.stButton button[kind="primary"],.stFormSubmitButton button[kind="primary"] {background:#ea7120; border:1px solid #ea7120; color:white;}
+.stButton button[kind="primary"]:hover,.stFormSubmitButton button[kind="primary"]:hover {background:#d66114; border-color:#d66114;}
+div[data-testid="stVerticalBlockBorderWrapper"]>div {border-color:#e2e9f1; border-radius:12px;}
+.hero {background:#fff;border:1px solid #e4eaf1;border-radius:13px;padding:20px 23px 18px;margin:0 0 18px;}
+.hero h1 {margin:0;font-size:1.48rem;color:#173c58;line-height:1.25;font-weight:750;}
+.hero p {margin:.4rem 0 0;color:#6d7e8e;font-size:.91rem;}
+.linecaption {font-size:.76rem;color:#6b7e8f;}
+[data-testid="stDataFrame"] {border:1px solid #e3eaf1;border-radius:10px;}
+</style>""", unsafe_allow_html=True)
+
+
+def header(title, subtitle):
+    st.markdown(f'<div class="hero"><h1>{html.escape(title)}</h1><p>{html.escape(subtitle)}</p></div>', unsafe_allow_html=True)
+
+
+def frame(rows, height=430):
+    d = rows if isinstance(rows, pd.DataFrame) else pd.DataFrame(rows)
+    if d.empty:
+        st.info("Sin registros para los filtros seleccionados.")
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True, height=min(height, 45 + len(df)*35))
+        st.dataframe(d, use_container_width=True, hide_index=True, height=height)
 
 
-def tabla_operativa(inv: list[dict]) -> pd.DataFrame:
-    df = pd.DataFrame(inv)
-    if df.empty:
-        return df
-    campos = {
-        "lote": "Lote", "fecha_postura": "Postura", "tipo_hi": "Clase",
-        "edad_repro": "Edad (sem.)", "guia_recepcion": "Guía", "ubicacion": "Ubicación",
-        "ingresos_hi": "Ingresos HI", "saldo_hi": "Saldo HI", "cajas": "Cajas",
-        "adicionales": "Adicionales", "dias_postura": "Días desde postura",
-        "dias_restantes": "Días restantes", "estado": "Prioridad",
-    }
-    return df[list(campos)].rename(columns=campos)
+def csv_download(label, rows, filename):
+    if isinstance(rows, pd.DataFrame):
+        d = rows
+    else:
+        d = pd.DataFrame(rows)
+    st.download_button(label, d.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                       file_name=filename, mime="text/csv", use_container_width=True)
 
 
-def opciones(inv: list[dict]) -> list[dict]:
-    return sorted((r for r in inv if r["saldo_hi"] > 0),
-                  key=lambda r: (r["dias_restantes"] if r["dias_restantes"] is not None else 9999,
-                                 r["fecha_postura"], r["lote"]))
+def plant_warehouses(data, plant):
+    return [x for x in data["almacenes"] if x["id_planta"] == plant and x.get("activo") == "SI"]
 
 
-def etiqueta(r: dict) -> str:
-    return f"{r['lote']} · {etiqueta_postura(r['fecha_postura'])} · {r['tipo_hi']} · {num_format(r['saldo_hi'])} HI · {r['ubicacion']}"
+def active_machines(data, plant):
+    return [x for x in data["maquinas"] if x["id_planta"] == plant and x.get("activo") == "SI"]
 
 
-def selector_cantidades(inv: list[dict], clave: str) -> list[dict]:
-    elegibles = opciones(inv)
-    if not elegibles:
-        st.warning("No existen recepciones con saldo disponible al corte seleccionado.")
-        return []
-    buscar_lote = st.text_input("Filtrar por lote o guía", key=f"{clave}_buscar", placeholder="Ej.: 228, SF C016, RECP...")
-    clase = st.selectbox("Clase de huevo", ["Todas", "OK", "R", "RR"], key=f"{clave}_clase")
-    if buscar_lote:
-        elegibles = [r for r in elegibles if buscar_lote.casefold() in
-                     (r["lote"] + " " + r["guia_recepcion"] + " " + r["ubicacion"]).casefold()]
-    if clase != "Todas":
-        elegibles = [r for r in elegibles if r["tipo_hi"] == clase]
-    by_id = {r["id_recepcion"]: r for r in elegibles}
-    seleccion = st.multiselect("Seleccionar recepciones (puede combinar varias)", list(by_id),
-                               format_func=lambda rid: etiqueta(by_id[rid]), key=f"{clave}_sel")
-    if not seleccion:
-        return []
-    entradas = [{"id_recepcion": rid, "Lote": by_id[rid]["lote"],
-                 "Postura": by_id[rid]["fecha_postura"], "Clase": by_id[rid]["tipo_hi"],
-                 "Disponible": by_id[rid]["saldo_hi"], "Cantidad HI": 0} for rid in seleccion]
-    ed = st.data_editor(
-        pd.DataFrame(entradas), hide_index=True, use_container_width=True,
-        disabled=["id_recepcion", "Lote", "Postura", "Clase", "Disponible"],
-        column_config={"Cantidad HI": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
-                       "id_recepcion": None}, key=f"{clave}_ed", num_rows="fixed",
-    )
-    items = [{"id_recepcion": r["id_recepcion"], "cantidad_hi": i_num(r["Cantidad HI"])} for r in ed.to_dict("records")]
-    suma = sum(r["cantidad_hi"] for r in items)
-    st.caption(f"Total seleccionado: {num_format(suma)} HI = {num_format(suma//HI_POR_CAJA)} cajas + {suma%HI_POR_CAJA} HI. Las cantidades en cero no se procesan.")
-    for it in items:
-        if it["cantidad_hi"] > by_id[it["id_recepcion"]]["saldo_hi"]:
-            st.error(f"La cantidad supera el saldo del lote {by_id[it['id_recepcion']]['lote']}.")
-    return [x for x in items if x["cantidad_hi"] > 0]
+def operation_scope(data, side_plant, key):
+    plant = side_plant if side_plant != "REG" else st.selectbox("Planta operativa", list(PLANTAS),
+                 format_func=lambda x: PLANTAS[x], key=f"pl_{key}")
+    warehouses = plant_warehouses(data, plant)
+    if not warehouses:
+        st.error("No hay almacenes activos para esta planta. Configúralos en Catálogos.")
+        st.stop()
+    ware = st.selectbox("Almacén", [w["id_almacen"] for w in warehouses],
+         format_func=lambda i: next(w["nombre"] for w in warehouses if w["id_almacen"] == i), key=f"wh_{key}")
+    return plant, ware
 
 
-def construir_movimientos(tipo: str, items: list[dict], fecha: date, documento: str,
-                           responsable: str, observacion="", incubadora="", destino="",
-                           causa="", transportista="", placa="", logtag="", operacion=None) -> list[dict]:
-    op = operacion or new_id("OP")
-    salida = []
-    for index, it in enumerate(items, 1):
-        cant = it["cantidad_hi"]
-        salida.append(dict(zip(MOVIMIENTO, [
-            f"{op}-{index:03d}", op, fecha.isoformat(), tipo, it["id_recepcion"], cant,
-            cant if tipo == "AJUSTE +" else -cant, incubadora, destino,
-            documento.strip(), responsable.strip(), causa.strip(), observacion.strip(),
-            transportista.strip(), placa.strip(), logtag.strip(), timestamp(), "", "",
-        ])))
-    return salida
+def filtered_inventory(data, cutoff, side_plant):
+    values = inventory(data, cutoff)
+    return [r for r in values if side_plant == "REG" or r["planta"] == side_plant]
 
 
-def presentar_dashboard(registros, inv, corte, reglas):
-    render_header("Centro de control", "Saldo disponible, prioridades de carga y movimientos del almacén de HI.", corte)
-    k = estadisticas(inv, registros["movimientos"], corte)
-    a,b,c,d = st.columns(4)
-    a.metric("Saldo en almacén", f"{num_format(k['saldo'])} HI")
-    b.metric("Cajas completas", num_format(k["cajas"]), f"+ {k['adicionales']} HI")
-    c.metric("HI a priorizar", num_format(k["prioridad"]))
-    d.metric("Recepciones con saldo", num_format(k["grupos"]))
-    a,b,c,d = st.columns(4)
-    a.metric("Ingresos acumulados", num_format(k["ingresos"]))
-    b.metric("Cargados a incubación", num_format(k["cargados"]))
-    c.metric("Transferidos a Tarapoto", num_format(k["transferidos"]))
-    d.metric("Antigüedad ponderada", f"{k['promedio_dias']} días")
-    st.caption("Los movimientos se descuentan una sola vez del almacén. Los días se cuentan desde la postura (no solo desde la llegada).")
-    c1,c2 = st.columns([1.3,1])
-    with c1:
-        with st.container(border=True):
-            st.subheader("Existencias por lote reproductora")
-            df = pd.DataFrame(inv)
-            if not df.empty:
-                df = df.groupby("lote", as_index=False)["saldo_hi"].sum().sort_values("saldo_hi", ascending=False).head(15)
-                st.bar_chart(df.set_index("lote"), y="saldo_hi", color="#1d6b96", height=310)
-            else:
-                st.info("Sin información de existencias.")
-    with c2:
-        with st.container(border=True):
-            st.subheader("Composición actual")
-            df = pd.DataFrame(inv)
-            if not df.empty:
-                series = df.groupby("tipo_hi")["saldo_hi"].sum().reindex(["OK", "R", "RR"], fill_value=0)
-                st.bar_chart(series, color="#e3782b", height=310)
-                st.caption("OK: incubable · R: recuperado almacén · RR: recuperado granja")
-            else:
-                st.info("Sin información.")
-    with st.container(border=True):
-        st.subheader("Prioridad de carga")
-        st.markdown('<div class="it-rule">Los objetivos por edad son <b>provisionales</b>, tomados del Excel. Deben ser aprobados por el área técnica antes de utilizarlos como criterio operativo.</div>', unsafe_allow_html=True)
-        foco = [r for r in opciones(inv) if r["estado"] in ("Objetivo superado", "Cargar hoy", "Próximo objetivo")]
-        tabla(tabla_operativa(foco).head(30) if foco else [], height=315)
-        st.caption(f"Reglas de ejemplo: <50 semanas {reglas[0]} días; 50–59 semanas {reglas[1]} días; ≥60 semanas {reglas[2]} días.")
-    inc = incidencias(registros, inv)
-    if inc:
-        with st.expander(f"Controles documentales pendientes ({len(inc)})"):
-            tabla(inc, 300)
+def stock_view_rows(data, cutoff, scope):
+    out = []
+    for r in filtered_inventory(data, cutoff, scope):
+        out.append({"Planta": PLANTAS.get(r["planta"], r["planta"]), "Almacén": r["almacen"],
+           "Ubicación": r["ubicacion"], "Lote": r["lote"], "Clase": r["tipo_hi"],
+           "Postura": r["fecha_postura"][:16], "Edad repro": r["edad_repro"],
+           "Recepción": r["fecha_ingreso"], "HI ingresados": r["cantidad_inicial"],
+           "Saldo HI": r["saldo"], "Cajas completas": max(r["saldo"], 0)//HI_CAJA,
+           "Días postura": r["dias_postura"], "Estado": status(r, data), "Documento": r["documento"],
+           "Partida ID": r["id_partida"]})
+    return pd.DataFrame(out)
 
 
-def presentar_recepciones(registros, inv, corte):
-    render_header("Recepciones de HI", "Cada recepción conserva su guía, postura, tipo de huevo y ubicación.", corte)
-    t1,t2 = st.tabs(["Registrar ingreso", "Ingresos registrados"])
-    with t1:
-        with st.container(border=True):
-            st.subheader("Nueva recepción a almacén")
-            with st.form("new_reception", clear_on_submit=True):
-                a,b,c = st.columns(3)
-                lote = a.text_input("Lote reproductora *", placeholder="Ej.: 237 / SF C016")
-                tipo = b.selectbox("Clase HI *", TIPOS_HI)
-                edad = c.number_input("Edad reproductora a postura (semanas) *", min_value=1, max_value=100, value=45)
-                a,b,c = st.columns(3)
-                postura = a.date_input("Fecha de postura *", max_value=date.today())
-                ingreso = b.date_input("Fecha de ingreso *", max_value=date.today())
-                cantidad = c.number_input("Cantidad de HI *", min_value=1, step=1)
-                a,b,c = st.columns(3)
-                ubicacion = a.text_input("Almacén / posición *", placeholder="Ej.: REFFER 2")
-                guia = b.text_input("Guía / código de recepción *", placeholder="Ej.: RECP-02-05-11")
-                origen = c.selectbox("Origen *", ORIGENES)
-                responsable = st.text_input("Responsable *", value=st.session_state.get("operador", ""))
-                observ = st.text_area("Observaciones / condición", height=85)
-                aceptar = st.checkbox("Confirmo que la información coincide con la recepción física")
-                guardar = st.form_submit_button("Registrar recepción", type="primary", use_container_width=True)
-            if guardar:
+def show_dashboard(data, scope):
+    header("Centro de control regional", "Existencias y actividad de Tarapoto, Pucacaca y Loreto en una única vista.")
+    cutoff = st.date_input("Fecha de corte", value=now().date(), max_value=now().date(), key="dash_cutoff")
+    inv = filtered_inventory(data, cutoff, scope)
+    ids = {r["id_partida"] for r in inv}
+    moves = [m for m in data["movimientos"] if m["id_partida"] in ids and
+             parse_date(m.get("fecha_movimiento")) and parse_date(m["fecha_movimiento"]) <= cutoff]
+    incoming = sum(number(m["cantidad"]) for m in moves if m["tipo"] == "INGRESO")
+    load = sum(number(m["cantidad"]) for m in moves if m["tipo"] == "CARGA")
+    tr_out = sum(number(m["cantidad"]) for m in moves if m["tipo"] == "TRANSFERENCIA_SALIDA")
+    available = sum(r["saldo"] for r in inv)
+    pending = pending_transfer_lines(data, cutoff, scope)
+    a,b,c,d,e = st.columns(5)
+    a.metric("Saldo disponible", fmt(available))
+    b.metric("Ingresos HI", fmt(incoming))
+    c.metric("Cargados a máquinas", fmt(load))
+    d.metric("Enviados a otras plantas", fmt(tr_out))
+    e.metric("En tránsito al destino", fmt(sum(x["pendiente"] for x in pending)))
+    st.caption("Los indicadores de movimientos son acumulados hasta el corte. El tránsito no forma parte del saldo disponible de ninguna planta.")
+    lft, rgt = st.columns([1.1, .9], gap="large")
+    with lft:
+        st.subheader("Disponibilidad por planta")
+        by = pd.DataFrame([{"Planta": PLANTAS[p], "Saldo HI": sum(r["saldo"] for r in inv if r["planta"] == p)} for p in PLANTAS])
+        st.bar_chart(by.set_index("Planta"), height=300)
+    with rgt:
+        st.subheader("Distribución por clase")
+        by = pd.DataFrame([{"Clase": c, "HI": sum(r["saldo"] for r in inv if r["tipo_hi"] == c)} for c in TIPOS_HI])
+        st.bar_chart(by.set_index("Clase"), height=300)
+    st.subheader("Alertas operativas")
+    alerts = [r for r in inv if r["saldo"] > 0 and status(r,data) in ("Objetivo superado", "Prioridad hoy")]
+    a,b,c = st.columns(3)
+    a.metric("HI por priorizar", fmt(sum(r["saldo"] for r in alerts)))
+    b.metric("Partidas activas", fmt(sum(r["saldo"] > 0 for r in inv)))
+    c.metric("Partidas con saldo negativo", fmt(sum(r["saldo"] < 0 for r in inv)))
+    if pending:
+        st.warning(f"Existen {len(pending)} líneas de transferencia con recepción pendiente. Revisa Traslados.")
+    if any(r["saldo"] < 0 for r in inv):
+        st.error("Se encontraron saldos negativos históricos. Revisar Auditoría antes de operar.")
+    frame([{"Planta": PLANTAS[r["planta"]], "Lote": r["lote"], "Clase": r["tipo_hi"],
+        "Postura": r["fecha_postura"][:16], "Saldo HI": r["saldo"], "Estado": status(r,data)} for r in alerts[:35]], 280)
+    st.caption("Alertas de antigüedad: se aplican parámetros de ejemplo 7/5/3 días por edad de reproductora, hasta que Incubación los valide.")
+
+
+def show_inventory(data, scope):
+    header("Existencias por almacén", "Saldos calculados desde el kardex; cada recepción mantiene su identidad y fecha/hora de postura.")
+    cutoff = st.date_input("Fecha de corte", value=now().date(), max_value=now().date(), key="inv_cutoff")
+    tab = stock_view_rows(data, cutoff, scope)
+    if tab.empty:
+        st.info("Aún no hay existencias para el corte seleccionado.")
+        return
+    a,b,c = st.columns(3)
+    plant_opts = sorted(tab["Planta"].unique().tolist())
+    plants = a.multiselect("Plantas", plant_opts, default=plant_opts)
+    classes = b.multiselect("Clases", list(TIPOS_HI), default=list(TIPOS_HI))
+    search = c.text_input("Buscar lote, guía o ID", placeholder="Ej. 237, SF RP01, guía...")
+    show = tab[tab["Planta"].isin(plants) & tab["Clase"].isin(classes)].copy()
+    if search:
+        mask = show[["Lote", "Documento", "Partida ID"]].fillna("").astype(str).apply(
+           lambda col: col.str.contains(re.escape(search), case=False), axis=0).any(axis=1)
+        show = show[mask]
+    v1,v2,v3 = st.columns(3)
+    v1.metric("Saldo filtrado", fmt(show["Saldo HI"].sum()))
+    v2.metric("Cajas completas", fmt(max(0,show["Saldo HI"].sum())//HI_CAJA))
+    v3.metric("Recepciones con saldo", fmt((show["Saldo HI"]>0).sum()))
+    frame(show.sort_values(["Postura", "Planta"], ascending=[True,True]), 540)
+    csv_download("Exportar existencias (CSV)", show, "incubatrack_existencias.csv")
+    st.caption("Leyenda: Objetivo superado = sobrepasó los días configurados; Prioridad hoy = ≤1 día restante; En plazo = dentro del objetivo.")
+
+
+def show_receipts(data, scope):
+    header("Registrar recepción de HI", "Ingreso documentado por planta y almacén; los saldos se generan desde el movimiento de entrada.")
+    plant, wh = operation_scope(data, scope, "rec")
+    with st.form("form_receipt", clear_on_submit=True):
+        c1,c2,c3 = st.columns(3)
+        lote = c1.text_input("Lote de reproductoras *")
+        clase = c2.selectbox("Clase HI", TIPOS_HI)
+        qty = c3.number_input("Cantidad HI *", min_value=1, step=1)
+        c4,c5,c6 = st.columns(3)
+        fecha = c4.date_input("Fecha de recepción *", value=now().date(), max_value=now().date())
+        fp = c5.date_input("Fecha de postura *", value=now().date(), max_value=now().date())
+        hp = c6.time_input("Hora de postura (si se conoce)", value=dt_time(0,0), step=1800)
+        c7,c8,c9 = st.columns(3)
+        edad = c7.number_input("Edad reproductoras (semanas)", 0, 100, value=0)
+        granja = c8.text_input("Granja / proveedor")
+        ubicacion = c9.text_input("Ubicación / cámara", placeholder="Ej. Estante 2")
+        c10,c11 = st.columns(2)
+        doc = c10.text_input("Guía / documento *")
+        operator = c11.text_input("Responsable *", value=st.session_state.get("operador", ""))
+        note = st.text_area("Observaciones sanitarias y de recepción", height=75)
+        confirm = st.checkbox("Confirmo que los datos y la cantidad corresponden a una recepción real")
+        submitted = st.form_submit_button("Registrar recepción", type="primary")
+    if submitted:
+        try:
+            if not all([lote.strip(), doc.strip(), operator.strip(), confirm]):
+                raise ValueError("Completa lote, documento, responsable y confirmación.")
+            if fp > fecha:
+                raise ValueError("La postura no puede ser posterior a la recepción.")
+            token = pending_id("rec", "PART")
+            fresh = read_fresh()
+            require_unique(fresh, "partidas", "id_partida", token)
+            # Impide un doble ingreso accidental del mismo comprobante y partida.
+            equal = [p for p in fresh["partidas"] if p.get("planta") == plant
+                  and p.get("almacen") == wh and source_id(p.get("lote")) == source_id(lote)
+                  and p.get("tipo_hi") == clase and parse_date(p.get("fecha_ingreso")) == fecha
+                  and txt(p.get("fecha_postura")) == datetime.combine(fp, hp).isoformat(timespec="seconds")
+                  and txt(p.get("documento")).casefold() == doc.strip().casefold()
+                  and number(p.get("cantidad_inicial")) == int(qty)]
+            if equal:
+                raise ValueError("Ya existe una recepción idéntica (lote, clase, postura, cantidad, fecha y guía). "
+                                 "Verifica el registro antes de duplicarlo.")
+            part = fields("partidas", {"id_partida": token, "planta": plant, "almacen": wh,
+               "ubicacion": ubicacion, "lote": source_id(lote), "granja": granja,
+               "procedencia": granja, "tipo_hi": clase, "fecha_postura": datetime.combine(fp,hp).isoformat(timespec="seconds"),
+               "edad_repro": edad, "fecha_ingreso": fecha.isoformat(), "cantidad_inicial": int(qty),
+               "documento": doc, "responsable": operator, "observacion": note, "origen": "EXTERNO", "creado_en": stamp()})
+            mov = make_mov(token, part, "INGRESO", int(qty), fecha, doc, operator, obs=note)
+            batch_write({"partidas": [part], "movimientos": [mov]})
+            reset_id("rec")
+            result(f"Recepción creada: {fmt(qty)} HI del lote {lote} en {PLANTAS[plant]}.")
+        except Exception as exc:
+            st.error(str(exc))
+    st.divider()
+    st.subheader("Recepciones recientes")
+    rec = [r for r in data["partidas"] if scope == "REG" or r["planta"] == scope]
+    frame([{"Fecha": r["fecha_ingreso"], "Planta": PLANTAS.get(r["planta"],r["planta"]),
+       "Lote": r["lote"], "Clase": r["tipo_hi"], "Cantidad HI":number(r["cantidad_inicial"]),
+       "Guía": r["documento"], "Responsable": r["responsable"]} for r in rec[-50:][::-1]], 310)
+
+
+def show_loads(data, scope):
+    header("Cargas por incubadora", "Una carga puede utilizar varias recepciones, y cada línea conserva el vínculo con su lote de origen.")
+    plant, wh = operation_scope(data, scope, "load")
+    mach = active_machines(data, plant)
+    if not mach:
+        st.warning("Antes de registrar una carga, configura las incubadoras reales de esta planta en Catálogos.")
+        return
+    a,b,c = st.columns(3)
+    mid = a.selectbox("Máquina de incubación *", [m["id_maquina"] for m in mach],
+        format_func=lambda id_: next(m["nombre"] for m in mach if m["id_maquina"] == id_))
+    fecha = b.date_input("Fecha de carga", value=now().date(), max_value=now().date(), key="load_date")
+    doc = c.text_input("Orden / documento de carga *", key="load_doc")
+    st.markdown("**Selecciona los huevos que ingresarán a la máquina:**")
+    lines = chosen_lines(data, plant, wh, "load")
+    count = sum(x["cantidad"] for x in lines)
+    a,b = st.columns([3,1])
+    operator = a.text_input("Responsable *", value=st.session_state.get("operador", ""), key="load_resp")
+    b.metric("Total a cargar", fmt(count))
+    notes = st.text_area("Observaciones de carga", key="load_notes")
+    confirm = st.checkbox("Confirmo la máquina, la orden y las cantidades seleccionadas", key="load_ok")
+    if st.button("Confirmar carga de HI", type="primary", disabled=count<=0, use_container_width=True):
+        try:
+            if not confirm:
+                raise ValueError("Confirma que verificaste la carga.")
+            recent = read_fresh()
+            if not any(m["id_maquina"] == mid and m["id_planta"] == plant for m in active_machines(recent, plant)):
+                raise ValueError("La máquina no pertenece a esta planta.")
+            commit_consumption("CARGA", "load", lines, plant, wh, fecha, doc, operator, machine=mid, obs=notes)
+        except Exception as exc:
+            st.error(str(exc))
+    st.divider()
+    st.subheader("Últimas cargas")
+    ms = [m for m in data["movimientos"] if m["tipo"] == "CARGA" and (scope == "REG" or m["planta"] == scope)]
+    frame([{"Fecha":m["fecha_movimiento"], "Planta": PLANTAS.get(m["planta"],m["planta"]),
+      "Máquina":m["id_maquina"] or "Pendiente (histórico)","Partida":m["id_partida"],
+      "HI":number(m["cantidad"]),"Orden":m["documento"],"Responsable":m["responsable"]} for m in ms[-80:][::-1]], 300)
+
+
+def pending_transfer_lines(data, cutoff=None, scope="REG"):
+    cutoff = cutoff or now().date()
+    heads = {t["id_transferencia"]:t for t in data["transferencias"] if parse_date(t["fecha_despacho"]) and parse_date(t["fecha_despacho"]) <= cutoff}
+    received = defaultdict(int)
+    for r in data["confirmaciones"]:
+        dt = parse_date(r.get("fecha_recepcion"))
+        if dt and dt <= cutoff:
+            received[r["id_linea"]] += number(r["cantidad_conforme"])+number(r["cantidad_rechazada"])+number(r["cantidad_faltante"])
+    rows = []
+    for line in data["lineas"]:
+        h = heads.get(line["id_transferencia"])
+        if h is None or scope not in ("REG", h["planta_origen"], h["planta_destino"]):
+            continue
+        sent = number(line["cantidad_enviada"])
+        pend = sent - received[line["id_linea"]]
+        if pend > 0:
+            rows.append({**line, **h, "pendiente":pend, "recibido_total":received[line["id_linea"]]})
+    return rows
+
+
+def show_transfers(data, scope):
+    header("Transferencias entre plantas", "Despacho → tránsito → confirmación en destino. Solo los huevos conformes ingresan al inventario receptor.")
+    tab1,tab2,tab3 = st.tabs(["Despachar", "Confirmar llegada", "Seguimiento"])
+    with tab1:
+        plant, wh = operation_scope(data, scope, "send")
+        destinations = [p for p in PLANTAS if p != plant]
+        c1,c2 = st.columns(2)
+        dest = c1.selectbox("Planta destino *", destinations, format_func=lambda c:PLANTAS[c], key="dest_plant")
+        dest_whs = plant_warehouses(data,dest)
+        if not dest_whs:
+            st.error("La planta destino debe tener un almacén activo.")
+        else:
+            dest_wh = c2.selectbox("Almacén destino *", [x["id_almacen"] for x in dest_whs],
+                         format_func=lambda i:next(w["nombre"] for w in dest_whs if w["id_almacen"]==i))
+            a,b = st.columns(2)
+            fecha = a.date_input("Fecha despacho",now().date(), max_value=now().date(), key="send_date")
+            doc = b.text_input("Guía de remisión / documento *", key="send_doc")
+            a,b,c = st.columns(3)
+            carrier = a.text_input("Transportista", key="send_carrier")
+            plate = b.text_input("Placa", key="send_plate")
+            logtag = c.text_input("ID LogTag", key="send_logtag")
+            st.markdown("**Detalle de huevos a transferir:**")
+            lines = chosen_lines(data, plant, wh, "send")
+            total = sum(x["cantidad"] for x in lines)
+            a,b = st.columns([3,1])
+            operator = a.text_input("Responsable de despacho *", value=st.session_state.get("operador", ""), key="send_resp")
+            b.metric("HI a enviar",fmt(total))
+            note = st.text_area("Observaciones del transporte",key="send_note")
+            confirm = st.checkbox("Confirmo el destino, guía y cantidades despachadas",key="send_ok")
+            if st.button("Registrar salida a tránsito",type="primary", disabled=total<=0, use_container_width=True):
                 try:
-                    if not all((lote.strip(), guia.strip(), ubicacion.strip(), responsable.strip())):
-                        raise ValueError("Complete lote, guía, ubicación y responsable.")
-                    if ingreso < postura:
-                        raise ValueError("La fecha de ingreso no puede ser anterior a la postura.")
-                    if not aceptar:
-                        raise ValueError("Confirme la verificación de la recepción antes de guardarla.")
-                    fila = dict(zip(RECEPCION, [new_id("REC"), clean_lote(lote),
-                         postura.isoformat(), int(edad), tipo, ingreso.isoformat(), int(cantidad),
-                         ubicacion.strip(), guia.strip(), origen, responsable.strip(), observ.strip(),
-                         "", "", timestamp(), ""]))
-                    registrar_recepcion(fila)
-                    flash("Recepción de HI guardada correctamente.")
+                    if not (doc.strip() and operator.strip() and confirm):
+                        raise ValueError("Documento, responsable y confirmación son obligatorios.")
+                    validate_lines(lines)
+                    fresh = read_fresh()
+                    txid = pending_id("send","TR")
+                    require_unique(fresh,"transferencias","id_transferencia",txid)
+                    lookup = {p["id_partida"]:p for p in fresh["partidas"]}
+                    moves, detail = [], []
+                    for x in lines:
+                        p = lookup.get(x["id_partida"])
+                        if not p or p["planta"] != plant or p["almacen"] != wh:
+                            raise ValueError("Hay partidas de otro almacén.")
+                        moves.append(make_mov(txid,p,"TRANSFERENCIA_SALIDA",x["cantidad"],fecha,doc,operator,transfer=txid,obs=note))
+                        detail.append(fields("lineas",{"id_linea":uid("LIN"),"id_transferencia":txid,
+                             "id_partida_origen":p["id_partida"],"cantidad_enviada":x["cantidad"],"creado_en":stamp()}))
+                    validate_deltas(fresh,moves)
+                    head = fields("transferencias",{"id_transferencia":txid,"fecha_despacho":fecha.isoformat(),
+                       "planta_origen":plant,"almacen_origen":wh,"planta_destino":dest,"almacen_destino":dest_wh,
+                       "documento":doc,"responsable":operator,"transportista":carrier,"placa":plate,
+                       "logtag":logtag,"observacion":note,"creado_en":stamp()})
+                    batch_write({"transferencias":[head],"lineas":detail,"movimientos":moves})
+                    reset_id("send")
+                    result(f"Transferencia {txid}: {fmt(total)} HI despachados hacia {PLANTAS[dest]}.")
                 except Exception as exc:
                     st.error(str(exc))
-    with t2:
-        registros_ = registros["recepciones"]
-        tabla([{"Fecha ingreso": x.get("fecha_ingreso", ""), "Lote": clean_lote(x.get("lote")),
-                "Postura": x.get("fecha_postura", ""), "Clase": x.get("tipo_hi", ""),
-                "Cantidad HI": i_num(x.get("cantidad_hi")), "Ubicación": x.get("ubicacion", ""),
-                "Guía": x.get("guia_recepcion", ""), "Responsable": x.get("responsable", ""),
-                "ID": x.get("id_recepcion", "")} for x in registros_], 470)
-        st.download_button("Exportar ingresos (CSV)", csv_bytes(registros_), file_name="HI_Pucacaca_Ingresos.csv", mime="text/csv")
-
-
-def presentar_existencias(registros, inv, corte):
-    render_header("Existencias y saldos", "Consulta por recepción, lote, fecha de postura y clase OK / R / RR.", corte)
-    c1,c2,c3 = st.columns(3)
-    lotes = sorted({r["lote"] for r in inv})
-    lote = c1.selectbox("Lote reproductora", ["Todos"]+lotes, key="filter_lot")
-    tipo = c2.selectbox("Clase HI", ["Todas", *TIPOS_HI], key="filter_class")
-    solo = c3.toggle("Solo saldos positivos", value=True)
-    datos = [r for r in inv if (lote == "Todos" or r["lote"] == lote) and
-             (tipo == "Todas" or r["tipo_hi"] == tipo) and (not solo or r["saldo_hi"] > 0)]
-    t1,t2,t3 = st.tabs(["Por recepción", "Por lote", "Por postura"])
-    with t1:
-        tabla(tabla_operativa(sorted(datos, key=lambda r:(r["dias_restantes"] if r["dias_restantes"] is not None else 999,
-                                                             r["fecha_postura"]))), 560)
-    with t2:
-        if datos:
-            df = pd.DataFrame(datos)
-            agg = df.pivot_table(index="lote", columns="tipo_hi", values="saldo_hi", aggfunc="sum", fill_value=0)
-            agg = agg.reindex(columns=list(TIPOS_HI), fill_value=0)
-            agg["TOTAL HI"] = agg.sum(axis=1)
-            agg["Cajas"] = agg["TOTAL HI"].clip(lower=0) // HI_POR_CAJA
-            agg["Adicionales"] = agg["TOTAL HI"].clip(lower=0) % HI_POR_CAJA
-            tabla(agg.reset_index().rename(columns={"lote":"Lote"}).sort_values("TOTAL HI", ascending=False), 470)
-        else: st.info("Sin datos.")
-    with t3:
-        if datos:
-            df = pd.DataFrame(datos)
-            agg = df.pivot_table(index=["lote", "fecha_postura"], columns="tipo_hi", values="saldo_hi", aggfunc="sum", fill_value=0)
-            agg = agg.reindex(columns=list(TIPOS_HI), fill_value=0)
-            agg["TOTAL HI"] = agg.sum(axis=1)
-            tabla(agg.reset_index().rename(columns={"lote":"Lote", "fecha_postura":"Postura"}), 470)
-        else: st.info("Sin datos.")
-    st.download_button("Exportar existencias filtradas (CSV)", csv_bytes(datos), file_name="HI_Pucacaca_Existencias.csv", mime="text/csv")
-    st.caption("Las cajas equivalentes de cada recepción se calculan individualmente; al consolidar se convierten los HI totales a cajas de 360, sin redondear remanentes por separado.")
-
-
-def presentar_cargas(registros, inv, corte):
-    render_header("Carga por incubadora", "Consumo de almacén por máquina, documento y recepciones de origen.", corte)
-    st.info("Una carga puede usar varias recepciones. Todas quedan vinculadas a una misma operación y a una incubadora. No registre aquí el traslado posterior a nacedora.")
-    hoy = date.today()
-    f = st.date_input("Fecha operativa de carga", value=hoy, max_value=hoy, key="fecha_carga")
-    inventario_fecha = inventario(registros["recepciones"], registros["movimientos"], f)
-    items = selector_cantidades(inventario_fecha, "cargas")
-    a,b,c = st.columns(3)
-    maquina = a.text_input("Incubadora *", placeholder="Ej.: INC-01")
-    doc = b.text_input("Orden / documento de carga *", placeholder="Ej.: CARG-2026-001")
-    resp = c.text_input("Responsable *", value=st.session_state.get("operador", ""), key="carga_resp")
-    obs = st.text_area("Observaciones de la carga", key="carga_obs", height=75)
-    confirmado = st.checkbox("Verifiqué máquina, documento, cantidades y saldos", key="carga_confirm")
-    suma = sum(x["cantidad_hi"] for x in items)
-    if st.button(f"Confirmar carga de {num_format(suma)} HI", type="primary", disabled=suma<=0, use_container_width=True):
-        try:
-            if not confirmado: raise ValueError("Marque la confirmación operativa.")
-            if not all((maquina.strip(), doc.strip(), resp.strip())):
-                raise ValueError("Incubadora, documento y responsable son obligatorios.")
-            draft = st.session_state.setdefault("draft_operacion_carga", new_id("OP"))
-            filas = construir_movimientos("CARGA", items, f, doc, resp, obs, incubadora=maquina, operacion=draft)
-            registrar_operacion(filas, f)
-            st.session_state.pop("draft_operacion_carga", None)
-            flash(f"Carga confirmada: {num_format(suma)} HI en {maquina}.")
-        except Exception as exc: st.error(str(exc))
-    st.divider()
-    st.subheader("Cargas registradas por incubadora")
-    cargos = [m for m in registros["movimientos"] if plain(m.get("tipo")) == "CARGA"]
-    if cargos:
-        df = pd.DataFrame(cargos)
-        df["incubadora"] = df["incubadora"].replace("", "Sin identificar (histórico)")
-        agrupado = df.groupby(["fecha_movimiento", "incubadora", "documento"], as_index=False)["cantidad_hi"].agg(lambda col: sum(i_num(x) for x in col))
-        tabla(agrupado.rename(columns={"fecha_movimiento":"Fecha", "incubadora":"Incubadora", "documento":"Documento", "cantidad_hi":"HI cargados"}), 360)
-    else: st.info("Sin cargas registradas.")
-
-
-def presentar_transferencias(registros, inv, corte):
-    render_header("Transferencias a Tarapoto", "Salidas documentadas de Pucacaca. La recepción en destino se confirma por separado.", corte)
-    hoy = date.today()
-    f = st.date_input("Fecha de despacho", value=hoy, max_value=hoy, key="f_transf")
-    inv_fecha = inventario(registros["recepciones"], registros["movimientos"], f)
-    items = selector_cantidades(inv_fecha, "transferencia")
-    a,b,c = st.columns(3)
-    st.text_input("Planta destino", value=DESTINO, disabled=True)
-    documento = a.text_input("Guía de remisión *", key="tr_documento")
-    responsable = b.text_input("Responsable despacho *", value=st.session_state.get("operador", ""), key="tr_responsable")
-    transportista = c.text_input("Transportista / conductor", key="tr_transportista")
-    a,b = st.columns(2)
-    placa = a.text_input("Placa de vehículo", key="tr_placa")
-    logtag = b.text_input("Código LogTag / registrador", key="tr_logtag")
-    obs = st.text_area("Observación de traslado", key="tr_obs", height=70)
-    confirmar = st.checkbox("Confirmo las cantidades entregadas al transporte", key="tr_ok")
-    suma = sum(x["cantidad_hi"] for x in items)
-    if st.button(f"Despachar {num_format(suma)} HI a Tarapoto", type="primary", disabled=suma<=0, use_container_width=True):
-        try:
-            if not confirmar: raise ValueError("Confirme la entrega física al transporte.")
-            if not documento.strip() or not responsable.strip():
-                raise ValueError("Guía de remisión y responsable son obligatorios.")
-            draft = st.session_state.setdefault("draft_operacion_transf", new_id("OP"))
-            filas = construir_movimientos("TRANSFERENCIA", items, f, documento, responsable, obs,
-                                          destino=DESTINO, transportista=transportista, placa=placa, logtag=logtag,
-                                          operacion=draft)
-            registrar_operacion(filas, f)
-            st.session_state.pop("draft_operacion_transf", None)
-            flash(f"Transferencia despachada: {num_format(suma)} HI a P.I. Tarapoto.")
-        except Exception as exc: st.error(str(exc))
-    st.divider()
-    st.subheader("Despachos y confirmaciones en Tarapoto")
-    transfers = [m for m in registros["movimientos"] if plain(m.get("tipo")) == "TRANSFERENCIA"]
-    groups = collections.defaultdict(list)
-    for m in transfers: groups[plain(m.get("id_operacion"))].append(m)
-    confs = collections.defaultdict(list)
-    for c in registros["confirmaciones"]: confs[plain(c.get("id_operacion"))].append(c)
-    vista = []
-    for id_op, rows in groups.items():
-        total = sum(i_num(r.get("cantidad_hi")) for r in rows)
-        aceptados = sum(i_num(c.get("recibidos_hi")) for c in confs[id_op])
-        rechazados = sum(i_num(c.get("rechazados_hi")) for c in confs[id_op])
-        faltantes = sum(i_num(c.get("faltantes_hi")) for c in confs[id_op])
-        conciliado = aceptados + rechazados + faltantes
-        vista.append({"ID operación":id_op, "Fecha":rows[0].get("fecha_movimiento", ""),
-            "Guía":rows[0].get("documento", ""), "Despachados HI":total,
-            "Recibidos HI":aceptados, "Rechazados HI":rechazados, "Faltantes HI":faltantes,
-            "Por conciliar":total-conciliado, "Estado":"Conciliado" if conciliado == total else "Pendiente"})
-    tabla(vista, 350)
-    if groups:
-        with st.expander("Confirmar llegada informada por Tarapoto"):
-            opciones_ops = [v["ID operación"] for v in vista if v["Por conciliar"] > 0]
-            if opciones_ops:
-                op = st.selectbox("Despacho pendiente", opciones_ops,
-                                  format_func=lambda x: f"{x} · {next(v['Guía'] for v in vista if v['ID operación']==x)}")
-                pendiente = next(v["Por conciliar"] for v in vista if v["ID operación"] == op)
-                with st.form("confirmacion_tar"):
-                    fecha = st.date_input("Fecha de recepción informada", value=date.today(), max_value=date.today())
-                    a,b,c = st.columns(3)
-                    recibidos = a.number_input("HI conformes", min_value=0, max_value=pendiente, value=pendiente)
-                    rechazados = b.number_input("HI rechazados", min_value=0, max_value=pendiente, value=0)
-                    faltantes = c.number_input("HI faltantes", min_value=0, max_value=pendiente, value=0)
-                    documento = st.text_input("Documento de recepción *")
-                    responsable = st.text_input("Responsable que confirma *", value=st.session_state.get("operador", ""))
-                    obs = st.text_area("Observaciones", height=65)
-                    submit = st.form_submit_button("Registrar confirmación de destino", type="primary")
-                if submit:
-                    try:
-                        if sum([recibidos,rechazados,faltantes]) <= 0 or sum([recibidos,rechazados,faltantes]) > pendiente:
-                            raise ValueError("Las cantidades deben conciliarse sin superar lo pendiente.")
-                        if not documento.strip() or not responsable.strip():
-                            raise ValueError("Documento y responsable obligatorios.")
-                        fresh = cargar_registros(fresco=True)
-                        all_sent = sum(i_num(m.get("cantidad_hi")) for m in fresh["movimientos"] if m.get("id_operacion") == op)
-                        all_confirmed = sum(i_num(x.get("recibidos_hi"))+i_num(x.get("rechazados_hi"))+i_num(x.get("faltantes_hi"))
-                                            for x in fresh["confirmaciones"] if x.get("id_operacion") == op)
-                        if sum([recibidos,rechazados,faltantes]) > all_sent - all_confirmed:
-                            raise ValueError("Otro usuario modificó el despacho; actualice la pantalla.")
-                        fila = dict(zip(CONFIRMACION, [new_id("CONF"), op, fecha.isoformat(),
-                              recibidos, rechazados, faltantes, documento.strip(), responsable.strip(), obs.strip(), timestamp()]))
-                        guardar_filas("confirmaciones", [fila]); flash("Confirmación de llegada registrada.")
-                    except Exception as exc: st.error(str(exc))
-            else: st.success("Todos los despachos están conciliados.")
-        st.caption("La confirmación en Tarapoto es un control documental de llegada; NO suma stock a Pucacaca.")
-
-
-def presentar_ajustes(registros, inv, corte):
-    render_header("Bajas y ajustes", "Correcciones justificadas mediante movimientos trazables; nunca se edita el saldo manualmente.", corte)
-    tipo = st.selectbox("Operación", ["BAJA", "AJUSTE +", "AJUSTE -"])
-    f = st.date_input("Fecha de la operación", value=date.today(), max_value=date.today())
-    inv_fecha = inventario(registros["recepciones"], registros["movimientos"], f)
-    lista = inv_fecha if tipo == "AJUSTE +" else opciones(inv_fecha)
-    if not lista:
-        st.warning("No existen recepciones para operar.")
-        return
-    by_id = {r["id_recepcion"]: r for r in lista}
-    rid = st.selectbox("Recepción", list(by_id), format_func=lambda x: etiqueta(by_id[x]))
-    cantidad = st.number_input("Cantidad HI", min_value=1, step=1)
-    a,b = st.columns(2)
-    causa = a.selectbox("Causa / motivo *", ["Rotura", "Contaminación", "Diferencia inventario", "Error documental", "Otro"])
-    doc = b.text_input("Documento / acta *")
-    responsable = st.text_input("Responsable *", value=st.session_state.get("operador", ""), key="aj_responsable")
-    obs = st.text_area("Explicación detallada *", height=85)
-    confirmar = st.checkbox("Confirmo que la corrección cuenta con sustento documental")
-    if st.button("Registrar movimiento de ajuste", type="primary"):
-        try:
-            if not confirmar or not doc.strip() or not obs.strip() or not responsable.strip():
-                raise ValueError("Documento, responsable, explicación y confirmación son obligatorios.")
-            draft = st.session_state.setdefault("draft_operacion_ajuste", new_id("OP"))
-            rows = construir_movimientos(tipo, [{"id_recepcion":rid, "cantidad_hi":int(cantidad)}], f, doc, responsable, obs, causa=causa, operacion=draft)
-            registrar_operacion(rows, f)
-            st.session_state.pop("draft_operacion_ajuste", None)
-            flash("Movimiento de ajuste registrado y vinculado a la recepción.")
-        except Exception as exc: st.error(str(exc))
-
-
-def presentar_conciliacion(registros, inv, corte):
-    render_header("Conciliación física", "Contrasta el conteo físico con el saldo del sistema, sin ajustar automáticamente las existencias.", corte)
-    disponibles = opciones(inv)
-    if not disponibles:
-        st.info("No existen recepciones con saldo disponible.")
-        return
-    by_id = {r["id_recepcion"]:r for r in disponibles}
-    rid = st.selectbox("Recepción que se contó", list(by_id), format_func=lambda x: etiqueta(by_id[x]))
-    saldo = by_id[rid]["saldo_hi"]
-    a,b,c = st.columns(3)
-    a.metric("Saldo del sistema", num_format(saldo))
-    fecha = b.date_input("Fecha del conteo", value=corte, max_value=date.today())
-    fisico = c.number_input("Conteo físico HI", min_value=0, value=saldo, step=1)
-    diferencia = int(fisico) - saldo
-    if diferencia == 0: st.success("Conteo conforme: sin diferencias.")
-    else: st.warning(f"Diferencia: {diferencia:+,} HI. Esta conciliación NO modifica el stock.")
-    with st.form("conteo"):
-        documento = st.text_input("Acta / documento de conteo *")
-        responsable = st.text_input("Responsable del conteo *", value=st.session_state.get("operador", ""))
-        observ = st.text_area("Hallazgos / explicación", height=70)
-        confirmado = st.checkbox("Confirmo que el conteo fue efectuado físicamente")
-        ok = st.form_submit_button("Guardar acta de conteo", type="primary")
-    if ok:
-        try:
-            if not confirmado or not documento.strip() or not responsable.strip():
-                raise ValueError("Documento, responsable y confirmación son obligatorios.")
-            if fecha != corte:
-                raise ValueError("Seleccione el mismo día como fecha de corte y conteo para evitar comparaciones incorrectas.")
-            frescos = cargar_registros(fresco=True)
-            saldo_fresco = {x["id_recepcion"]:x["saldo_hi"] for x in inventario(frescos["recepciones"], frescos["movimientos"], corte)}.get(rid)
-            if saldo_fresco != saldo:
-                raise ValueError("El saldo cambió desde el inicio del conteo; refresque y repita la conciliación.")
-            fila = dict(zip(CONTEO, [new_id("CNT"), fecha.isoformat(), rid, saldo, int(fisico), diferencia,
-                                         documento.strip(), responsable.strip(), observ.strip(), timestamp()]))
-            guardar_filas("conteos", [fila]); flash("Acta de conciliación registrada. No se alteró el saldo contable.")
-        except Exception as exc: st.error(str(exc))
-    st.divider()
-    st.subheader("Últimos conteos")
-    tabla(registros["conteos"][-40:][::-1], 360)
-    st.caption("Para regularizar una diferencia autorizada, ingrese posteriormente a Bajas y ajustes con su acta de sustento.")
-
-
-def presentar_historial(registros, inv, corte):
-    render_header("Trazabilidad y auditoría", "Reconstruye la historia de cada recepción y todos los cambios del inventario.", corte)
-    tab1,tab2,tab3 = st.tabs(["Expediente de recepción", "Libro de movimientos", "Alertas de integridad"])
-    with tab1:
-        if not inv:
-            st.info("Aún no existen recepciones.")
-        else:
-            by_id = {r["id_recepcion"]: r for r in inv}
-            rid = st.selectbox("Seleccione una recepción", list(by_id), format_func=lambda x: etiqueta(by_id[x]))
-            r = by_id[rid]
-            a,b,c,d = st.columns(4)
-            a.metric("Saldo HI",num_format(r["saldo_hi"]))
-            b.metric("Ingreso HI",num_format(r["ingresos_hi"]))
-            c.metric("Lote",r["lote"])
-            d.metric("Tipo",r["tipo_hi"])
-            st.caption(f"ID interno: {rid}  ·  Guía: {r['guia_recepcion']}  ·  Ubicación: {r['ubicacion']}  ·  Postura: {r['fecha_postura']}")
-            m = [x for x in registros["movimientos"] if plain(x.get("id_recepcion")) == rid]
-            origen = [{"Fecha":r["fecha_ingreso"], "Movimiento":"INGRESO", "Documento":r["guia_recepcion"],
-                       "Incubadora":"", "Variación HI":r["ingresos_hi"], "Responsable":r["responsable"]}]
-            origen.extend({"Fecha":x.get("fecha_movimiento", ""), "Movimiento":x.get("tipo", ""),
-                           "Documento":x.get("documento", ""), "Incubadora":x.get("incubadora", ""),
-                           "Variación HI":i_num(x.get("variacion_hi")), "Responsable":x.get("responsable", "")} for x in m)
-            tabla(sorted(origen, key=lambda x:x["Fecha"]), 380)
     with tab2:
-        tipo = st.selectbox("Filtrar movimiento", ["Todos", *TIPOS_MOV])
-        ms = [x for x in registros["movimientos"] if tipo == "Todos" or x.get("tipo") == tipo]
-        tabla(ms[::-1], 520)
-        st.download_button("Exportar libro de movimientos (CSV)", csv_bytes(ms),
-                           file_name="HI_Pucacaca_Movimientos.csv", mime="text/csv")
+        pending = pending_transfer_lines(data,scope=scope)
+        if not pending:
+            st.success("No existen transferencias pendientes en el ámbito seleccionado.")
+        else:
+            txs = sorted({x["id_transferencia"] for x in pending})
+            descriptions = {x["id_transferencia"]: f"{x['id_transferencia']} · {PLANTAS[x['planta_origen']]} → {PLANTAS[x['planta_destino']]}" for x in pending}
+            transfer_id = st.selectbox("Transferencia en tránsito",txs,format_func=lambda x:descriptions[x],key="arrival_tx")
+            lines = [x for x in pending if x["id_transferencia"]==transfer_id]
+            choice = st.selectbox("Partida enviada",[x["id_linea"] for x in lines],
+                format_func=lambda id_:f"{id_[-8:]} · pendiente {fmt(next(l['pendiente'] for l in lines if l['id_linea']==id_))} HI")
+            line = next(x for x in lines if x["id_linea"]==choice)
+            p0 = next((p for p in data["partidas"] if p["id_partida"]==line["id_partida_origen"]),None)
+            if p0 is None:
+                st.error("La partida de origen no existe; requiere revisión de auditoría.")
+            else:
+                st.info(f"Origen: {PLANTAS[line['planta_origen']]} · Destino: {PLANTAS[line['planta_destino']]} · "
+                        f"Lote: {p0['lote']} / {p0['tipo_hi']} · Pendiente: {fmt(line['pendiente'])} HI")
+                with st.form("arrival_form"):
+                    a,b,c = st.columns(3)
+                    ok = a.number_input("HI conformes",min_value=0, max_value=int(line["pendiente"]),step=1)
+                    reject = b.number_input("HI rechazados",min_value=0,max_value=int(line["pendiente"]),step=1)
+                    missing = c.number_input("HI faltantes",min_value=0,max_value=int(line["pendiente"]),step=1)
+                    a,b = st.columns(2)
+                    f_arrive = a.date_input("Fecha recepción",now().date(),min_value=parse_date(line["fecha_despacho"]),max_value=now().date())
+                    doc = b.text_input("Acta / guía de recepción *")
+                    operator = st.text_input("Responsable receptor *",value=st.session_state.get("operador",""))
+                    location = st.text_input("Ubicación física en destino",value=p0.get("ubicacion", ""))
+                    note = st.text_area("Diferencias, embalaje y temperatura observada",height=75)
+                    sure = st.checkbox("Confirmo la cantidad realmente recibida y las diferencias documentadas")
+                    sent = st.form_submit_button("Confirmar recepción",type="primary")
+                if sent:
+                    try:
+                        qty = int(ok)+int(reject)+int(missing)
+                        if qty<=0 or qty>line["pendiente"]:
+                            raise ValueError("Las cantidades deben sumar entre 1 y el pendiente de la línea.")
+                        if not (doc.strip() and operator.strip() and sure):
+                            raise ValueError("Documento, responsable y confirmación obligatorios.")
+                        fresh = read_fresh()
+                        latest = next((x for x in pending_transfer_lines(fresh,scope="REG") if x["id_linea"]==choice),None)
+                        if latest is None or qty>latest["pendiente"]:
+                            raise ValueError("El pendiente cambió desde que abriste el formulario. Actualiza la pantalla.")
+                        confirmation_id = pending_id("arrival","CONF")
+                        require_unique(fresh,"confirmaciones","id_confirmacion",confirmation_id)
+                        parent = next(p for p in fresh["partidas"] if p["id_partida"]==latest["id_partida_origen"])
+                        child_id = "PART-"+uuid.uuid5(NS,confirmation_id).hex[:20].upper() if ok>0 else ""
+                        record = fields("confirmaciones",{"id_confirmacion":confirmation_id,"id_transferencia":transfer_id,
+                            "id_linea":choice,"fecha_recepcion":f_arrive.isoformat(),"cantidad_conforme":int(ok),
+                            "cantidad_rechazada":int(reject),"cantidad_faltante":int(missing),"id_partida_destino":child_id,
+                            "documento":doc,"responsable":operator,"observacion":note,"creado_en":stamp()})
+                        groups = {"confirmaciones":[record]}
+                        if ok>0:
+                            part = fields("partidas",{"id_partida":child_id,"planta":latest["planta_destino"],
+                              "almacen":latest["almacen_destino"],"ubicacion":location,"lote":parent["lote"],
+                              "granja":parent["granja"],"procedencia":parent["procedencia"],"tipo_hi":parent["tipo_hi"],
+                              "fecha_postura":parent["fecha_postura"],"edad_repro":parent["edad_repro"],
+                              "fecha_ingreso":f_arrive.isoformat(),"cantidad_inicial":int(ok),"documento":doc,
+                              "responsable":operator,"observacion":note,"origen":"TRANSFERENCIA",
+                              "id_partida_padre":parent["id_partida"],"id_transferencia":transfer_id,
+                              "id_linea_transferencia":choice,"creado_en":stamp()})
+                            movement = make_mov(confirmation_id,part,"INGRESO",int(ok),f_arrive,doc,operator,
+                                               transfer=transfer_id,obs=note)
+                            groups.update({"partidas":[part],"movimientos":[movement]})
+                        batch_write(groups)
+                        reset_id("arrival")
+                        result(f"Recepción confirmada: {fmt(ok)} HI conformes; {fmt(reject)} rechazados; {fmt(missing)} faltantes.")
+                    except Exception as exc:
+                        st.error(str(exc))
     with tab3:
-        alertas = incidencias(registros, inv)
-        if not alertas: st.success("No se detectaron incidencias en los controles automáticos disponibles.")
-        else: tabla(alertas, 460)
-        st.caption("Los códigos de recepción duplicados en el Excel se mantienen por separado; las cargas históricas sin incubadora no se completan artificialmente.")
+        pending = pending_transfer_lines(data,scope=scope)
+        st.subheader("Pendientes por recibir")
+        frame([{"Transferencia":r["id_transferencia"],"Origen":PLANTAS[r["planta_origen"]],
+           "Destino":PLANTAS[r["planta_destino"]],"Guía":r["documento"],"Enviados":number(r["cantidad_enviada"]),
+           "Procesados":r["recibido_total"],"En tránsito":r["pendiente"],"Línea":r["id_linea"]} for r in pending],340)
+        st.subheader("Recepciones confirmadas")
+        frame([{"Fecha":r["fecha_recepcion"],"Transferencia":r["id_transferencia"],"Conformes":number(r["cantidad_conforme"]),
+          "Rechazados":number(r["cantidad_rechazada"]),"Faltantes":number(r["cantidad_faltante"]),
+          "Documento":r["documento"],"Responsable":r["responsable"]} for r in data["confirmaciones"][-70:][::-1]],310)
 
 
-def presentar_importacion(registros, inv, corte, reglas):
-    render_header("Importación y parámetros", "Previsualiza el Excel recibido y migra únicamente a hojas nuevas, sin alterar los datos originales.", corte)
-    t1,t2,t3 = st.tabs(["Importar Excel", "Reglas del control", "Estado de conexión"])
+def show_adjustment(data, scope):
+    header("Bajas y ajustes", "Correcciones sustentadas documentalmente; los registros anteriores nunca se editan ni eliminan.")
+    plant, wh = operation_scope(data,scope,"adjust")
+    opts = asof_options(data,plant,wh,now().date())
+    if not opts:
+        st.info("Sin existencias en el almacén seleccionado.")
+        return
+    id_ = st.selectbox("Partida",[r["id_partida"] for r in opts],format_func=lambda k:label_partida(next(r for r in opts if r["id_partida"]==k)))
+    part = next(r for r in opts if r["id_partida"]==id_)
+    c1,c2,c3 = st.columns(3)
+    kind = c1.selectbox("Movimiento",["BAJA","AJUSTE +","AJUSTE -"])
+    qty = c2.number_input("Cantidad HI",min_value=1,step=1)
+    date_op = c3.date_input("Fecha",now().date(),max_value=now().date())
+    a,b = st.columns(2)
+    doc = a.text_input("Documento / acta *")
+    operator = b.text_input("Responsable *",value=st.session_state.get("operador",""))
+    cause = st.selectbox("Causa *",["Diferencia de inventario","Rotura","Contaminación","Clasificación","Error de registro","Otro"])
+    note = st.text_area("Justificación detallada *")
+    sure = st.checkbox("Confirmo que el ajuste o baja cuenta con sustento documental")
+    if st.button("Registrar ajuste/baja", type="primary",use_container_width=True):
+        try:
+            if not (doc.strip() and operator.strip() and note.strip() and sure):
+                raise ValueError("Acta, responsable, justificación y confirmación son obligatorios.")
+            fresh = read_fresh()
+            p = next((x for x in fresh["partidas"] if x["id_partida"]==id_),None)
+            if not p:
+                raise ValueError("La partida ya no existe.")
+            op = pending_id("adjust")
+            require_unique(fresh,"movimientos","id_operacion",op)
+            m = make_mov(op,p,kind,int(qty),date_op,doc,operator,cause=cause,obs=note)
+            validate_deltas(fresh,[m])
+            batch_write({"movimientos":[m]})
+            reset_id("adjust")
+            result(f"{kind} registrado por {fmt(qty)} HI.")
+        except Exception as exc:
+            st.error(str(exc))
+
+
+def show_count(data, scope):
+    header("Conciliación física", "El conteo registra diferencias; nunca modifica el inventario automáticamente.")
+    plant, wh = operation_scope(data,scope,"count")
+    opts = asof_options(data,plant,wh,now().date())
+    if not opts:
+        st.info("No hay partidas para conciliar.")
+        return
+    id_ = st.selectbox("Partida a contar",[r["id_partida"] for r in opts],
+         format_func=lambda k:label_partida(next(r for r in opts if r["id_partida"]==k)))
+    part = next(r for r in opts if r["id_partida"]==id_)
+    st.metric("Saldo del sistema",fmt(part["saldo"]))
+    with st.form("count_form"):
+        count = st.number_input("Conteo físico HI",min_value=0,value=int(part["saldo"]),step=1)
+        doc = st.text_input("Acta de conteo *")
+        operator = st.text_input("Responsable *",value=st.session_state.get("operador",""))
+        note = st.text_area("Hallazgo del conteo")
+        sure = st.checkbox("Confirmo que este conteo se realizó físicamente")
+        submit = st.form_submit_button("Guardar conteo",type="primary")
+    if submit:
+        try:
+            if not (doc.strip() and operator.strip() and sure):
+                raise ValueError("Completa acta, responsable y confirmación.")
+            fresh = read_fresh()
+            fresh_part = next(r for r in inventory(fresh) if r["id_partida"]==id_)
+            if fresh_part["saldo"] != part["saldo"]:
+                raise ValueError("El saldo cambió. Actualiza antes de confirmar el conteo.")
+            op = pending_id("count","CNT")
+            require_unique(fresh,"conteos","id_conteo",op)
+            batch_write({"conteos":[fields("conteos",{"id_conteo":op,"fecha_conteo":now().date().isoformat(),
+                "id_partida":id_,"saldo_sistema":part["saldo"],"conteo_fisico":int(count),
+                "diferencia":int(count)-part["saldo"],"documento":doc,"responsable":operator,
+                "observacion":note,"creado_en":stamp()})]})
+            reset_id("count")
+            result(f"Conteo registrado. Diferencia física: {int(count)-part['saldo']:+,} HI (sin ajustar stock).")
+        except Exception as exc:
+            st.error(str(exc))
+    st.subheader("Últimos conteos")
+    frame(data["conteos"][-50:][::-1],330)
+
+
+def family_chain(data,pid):
+    index = {p["id_partida"]:p for p in data["partidas"]}
+    out, seen = [], set()
+    current = pid
+    while current and current in index and current not in seen:
+        seen.add(current)
+        out.append(index[current])
+        current = txt(index[current].get("id_partida_padre"))
+    return list(reversed(out))
+
+
+def show_trace(data, scope):
+    header("Trazabilidad integral", "Sigue cada partida desde su procedencia hasta cargas en máquinas y transferencias entre plantas.")
+    inv = filtered_inventory(data,now().date(),scope)
+    if not inv:
+        st.info("Aún no hay partidas registradas.")
+        return
+    lookup = {r["id_partida"]:r for r in inv}
+    needle = st.text_input("Buscar lote, documento o partida",placeholder="Ej. 237, RECP-01...")
+    options = [r for r in inv if not needle or needle.casefold() in
+         (r["lote"]+" "+r["documento"]+" "+r["id_partida"]).casefold()]
+    if not options:
+        st.info("No hay coincidencias.")
+        return
+    rid = st.selectbox("Partida",[r["id_partida"] for r in options],
+          format_func=lambda i:label_partida(lookup[i]),key="trace_select")
+    p = lookup[rid]
+    a,b,c,d = st.columns(4)
+    a.metric("Saldo disponible",fmt(p["saldo"]))
+    b.metric("HI recibidos",fmt(p["cantidad_inicial"]))
+    c.metric("Lote",p["lote"])
+    d.metric("Planta",PLANTAS[p["planta"]])
+    st.caption(f"Partida: {rid}  ·  Postura: {p['fecha_postura']}  ·  Documento: {p['documento']}")
+    st.subheader("Cadena de procedencia")
+    chain = family_chain(data,rid)
+    frame([{"Paso":i+1,"Planta":PLANTAS.get(x["planta"],x["planta"]),"Lote":x["lote"],
+        "Recepción":x["fecha_ingreso"],"Cantidad HI":number(x["cantidad_inicial"]),
+        "Guía":x["documento"],"Partida ID":x["id_partida"]} for i,x in enumerate(chain)],240)
+    st.subheader("Movimientos de la partida")
+    ms = [m for m in data["movimientos"] if m["id_partida"] == rid]
+    frame([{"Fecha":m["fecha_movimiento"],"Operación":m["tipo"],"Cantidad HI":number(m["cantidad"]),
+      "Variación":number(m["variacion"]),"Máquina":m["id_maquina"],"Transferencia":m["id_transferencia"],
+      "Documento":m["documento"],"Responsable":m["responsable"]} for m in ms],320)
+    # También mostrar destinos hijos, con uno o varios traspasos posteriores.
+    children = [x for x in data["partidas"] if x.get("id_partida_padre")==rid]
+    if children:
+        st.subheader("Partidas derivadas en otras plantas")
+        frame([{"Planta":PLANTAS.get(x["planta"],x["planta"]),"Partida derivada":x["id_partida"],
+          "Lote":x["lote"],"Recibidos conformes":number(x["cantidad_inicial"]),"Guía":x["documento"]} for x in children],200)
+    csv_download("Exportar trazabilidad (CSV)",ms,f"trazabilidad_{rid[-8:]}.csv")
+
+
+def audit_issues(data):
+    issues = []
+    part_ids = [p["id_partida"] for p in data["partidas"]]
+    for key,n in Counter(part_ids).items():
+        if n>1:
+            issues.append({"Severidad":"CRÍTICA","Referencia":key,"Hallazgo":"ID de partida duplicado"})
+    ids = set(part_ids)
+    for r in inventory(data):
+        if r["saldo"]<0:
+            issues.append({"Severidad":"CRÍTICA","Referencia":r["id_partida"],"Hallazgo":"Saldo negativo"})
+        if r["origen"]=="EXCEL HISTÓRICO" and r["codigo_excel"]:
+            # duplicados del Excel se conservan, no se fusionan
+            pass
+    for m in data["movimientos"]:
+        if m["id_partida"] not in ids:
+            issues.append({"Severidad":"CRÍTICA","Referencia":m["id_movimiento"],"Hallazgo":"Movimiento sin partida"})
+        if m["tipo"]=="CARGA" and not m["id_maquina"]:
+            issues.append({"Severidad":"REVISAR","Referencia":m["id_movimiento"],"Hallazgo":"Carga sin incubadora (posible histórico)"})
+        if not m["documento"]:
+            issues.append({"Severidad":"REVISAR","Referencia":m["id_movimiento"],"Hallazgo":"Movimiento sin documento"})
+    totals = defaultdict(int)
+    for c in data["confirmaciones"]:
+        totals[c["id_linea"]] += number(c["cantidad_conforme"])+number(c["cantidad_rechazada"])+number(c["cantidad_faltante"])
+    for l in data["lineas"]:
+        if totals[l["id_linea"]]>number(l["cantidad_enviada"]):
+            issues.append({"Severidad":"CRÍTICA","Referencia":l["id_linea"],"Hallazgo":"Recepciones exceden el despacho"})
+    return issues
+
+
+def show_audit(data,scope):
+    header("Kardex y auditoría", "Movimientos inmutables, saldos conciliados y alertas de integridad de registros.")
+    tab1,tab2,tab3 = st.tabs(["Libro de movimientos","Incidencias","Conteos"])
+    with tab1:
+        moves = [m for m in data["movimientos"] if scope=="REG" or m["planta"]==scope]
+        selection = st.selectbox("Tipo de movimiento", ["Todos"]+sorted({m["tipo"] for m in moves}))
+        filtered = [m for m in moves if selection=="Todos" or m["tipo"]==selection]
+        frame(filtered[-400:][::-1],525)
+        csv_download("Descargar Kardex CSV",filtered,"IncubaTrack_Kardex.csv")
+    with tab2:
+        issues = audit_issues(data)
+        if not issues:
+            st.success("No se encontraron incidencias en los controles automatizados.")
+        else:
+            frame(issues,470)
+        st.caption("La auditoría es documental. El campo Responsable se escribe manualmente hasta implementar autenticación real.")
+    with tab3:
+        frame(data["conteos"][-100:][::-1],460)
+
+
+def show_catalogs(data,scope):
+    header("Catálogos y reglas", "Configura almacenes y máquinas por planta, y valida los objetivos de antigüedad.")
+    t1,t2,t3 = st.tabs(["Almacenes","Incubadoras","Parámetros"])
     with t1:
-        st.markdown("**Compatible con las hojas `Existencias` y `Movimientos` del archivo recibido.** Conserva las clases OK/R/RR, sus cantidades y sus guías.")
-        f = st.file_uploader("Seleccionar Control Almacen de HI DonPollo.xlsx", type=["xlsx"], key="excel_ingreso")
-        if f is not None:
+        frame([{"Planta":PLANTAS.get(w["id_planta"],w["id_planta"]),"Código":w["id_almacen"],
+         "Almacén":w["nombre"],"Activo":w["activo"]} for w in data["almacenes"]],260)
+        with st.form("add_wh"):
+            plant = st.selectbox("Planta",list(PLANTAS),format_func=lambda p:PLANTAS[p],key="wh_pl")
+            code = st.text_input("Código de almacén (único) *",placeholder="Ej. ALM-PUC-02")
+            name = st.text_input("Nombre del almacén *")
+            confirmed = st.checkbox("Confirmo que este almacén existe físicamente")
+            submit = st.form_submit_button("Agregar almacén", type="primary")
+        if submit:
             try:
-                contenido = f.getvalue()
-                if len(contenido) > 12_000_000:
-                    raise ValueError("Archivo demasiado grande (>12 MB) para esta importación.")
-                parsed = preparar_importacion_excel(contenido)
-                r,m = parsed["recepciones"],parsed["movimientos"]
-                a,b,c,d = st.columns(4)
-                a.metric("Recepciones a evaluar", len(r));b.metric("Movimientos a evaluar",len(m))
-                c.metric("HI ingresados",num_format(sum(x["cantidad_hi"] for x in r)))
-                d.metric("HI movimientos",num_format(sum(x["cantidad_hi"] for x in m)))
-                st.caption(f"Identificador de archivo: {parsed['importacion_id']}")
-                for codigo,n in parsed["duplicados"].items():
-                    st.warning(f"Código histórico duplicado {codigo}: {n} recepciones. Se crearán IDs internos individuales; no se fusionarán cantidades.")
-                for nota in parsed["pendientes"][:25]: st.error(nota)
-                if len(parsed["pendientes"])>25: st.warning("Existen más incidencias; revisar el archivo.")
-                saldo_calc = sum(x["cantidad_hi"] for x in r) + sum(x["variacion_hi"] for x in m)
-                st.info(f"Saldo proyectado con este archivo, antes de sumar operaciones posteriores: {num_format(saldo_calc)} HI.")
-                with st.expander("Ver muestra de recepciones"):
-                    tabla(r[:12], 400)
-                actuales_ids = {plain(x.get("id_recepcion")) for x in registros["recepciones"]}
-                faltan = sum(x["id_recepcion"] not in actuales_ids for x in r)
-                st.caption(f"Recepciones nuevas en destino: {faltan}. La importación es reintentable y no duplica las filas del mismo archivo.")
-                st.warning("Si ya hay movimientos en el sistema, antes de importar un saldo histórico adicional confirme que no representan las mismas existencias.")
-                confirmar = st.checkbox("Confirmo que validé el corte y que este archivo no duplica inventario ya registrado", key="confirmar_import")
-                if st.button("Importar después de verificar", type="primary", disabled=not confirmar):
-                    resultado = migrar_archivo(parsed)
-                    flash(f"Importación terminada: {resultado['recepciones']} recepciones y {resultado['movimientos']} movimientos nuevos.")
-            except Exception as exc:
-                st.error(f"No se pudo preparar o importar el Excel: {exc}")
-        else:
-            st.info("Sube el archivo Excel para revisar sus datos y comenzar una prueba en modo demostración, o importarlo a las hojas nuevas de Google Sheets.")
+                fresh=read_fresh()
+                code=code.strip().upper()
+                if not (code and name.strip() and confirmed):
+                    raise ValueError("Código, nombre y confirmación son obligatorios.")
+                require_unique(fresh,"almacenes","id_almacen",code)
+                batch_write({"almacenes":[fields("almacenes",{"id_almacen":code,"id_planta":plant,
+                   "nombre":name,"activo":"SI","creado_en":stamp()})]})
+                result("Almacén agregado.")
+            except Exception as exc: st.error(str(exc))
     with t2:
-        st.subheader("Parámetros que deben validar Operaciones e Incubación")
-        st.markdown(f"- Huevos por caja: **{HI_POR_CAJA} HI** (según el Excel).  ")
-        st.markdown(f"- Reproductoras menores de 50 semanas: **{reglas[0]} días**.  ")
-        st.markdown(f"- Reproductoras de 50–59 semanas: **{reglas[1]} días**.  ")
-        st.markdown(f"- Reproductoras desde 60 semanas: **{reglas[2]} días**.  ")
-        st.warning("Estas referencias de almacenamiento son ejemplos del Excel: no representan estándares aprobados. Pueden ajustarse desde el menú lateral para análisis exploratorio.")
-        st.caption("Fecha de postura = día 0. La antigüedad incluye tiempo en granja, transporte y planta. El saldo se calcula al corte seleccionado.")
+        frame([{"Planta":PLANTAS.get(m["id_planta"],m["id_planta"]),"Código":m["id_maquina"],
+           "Incubadora":m["nombre"],"Activo":m["activo"]} for m in data["maquinas"]],260)
+        with st.form("add_machine"):
+            plant = st.selectbox("Planta",list(PLANTAS),format_func=lambda p:PLANTAS[p],key="mach_pl")
+            code = st.text_input("Código real de máquina *",placeholder="Ej. PUC-INC-01")
+            name = st.text_input("Descripción *",placeholder="Ej. Incubadora 1")
+            confirmed = st.checkbox("Confirmo que la máquina pertenece a esta planta")
+            submit=st.form_submit_button("Agregar incubadora",type="primary")
+        if submit:
+            try:
+                fresh=read_fresh()
+                code=code.strip().upper()
+                if not (code and name.strip() and confirmed):
+                    raise ValueError("Código, nombre y confirmación son obligatorios.")
+                require_unique(fresh,"maquinas","id_maquina",code)
+                batch_write({"maquinas":[fields("maquinas",{"id_maquina":code,"id_planta":plant,
+                   "nombre":name,"activo":"SI","creado_en":stamp()})]})
+                result("Incubadora agregada correctamente.")
+            except Exception as exc: st.error(str(exc))
     with t3:
-        st.metric("Modo de persistencia", "Google Sheets" if tiene_secrets() else "Demo temporal")
-        if tiene_secrets():
-            st.success("Las nuevas operaciones se guardan en hojas separadas de Google Sheets.")
-        else:
-            st.warning("Sin credenciales: los registros de esta sesión solo viven en la memoria de la aplicación. Se perderán al reiniciar o cerrar la sesión.")
-        tabla([{"Hoja nueva":k, "N.º de campos":len(v)} for k,v in SHEETS.items()], 250)
-        st.caption("Las hojas anteriores `lotes`, `movimientos` y las hojas `traz_*` de IncubaTrack 2.0 no se modifican.")
-        st.error("Límite operativo: Google Sheets no ofrece transacciones ni bloqueo concurrente. Para alta concurrencia se requiere base de datos transaccional y autenticación por usuario.")
+        plant = st.selectbox("Planta para los objetivos",list(PLANTAS),format_func=lambda p:PLANTAS[p])
+        rules = limits(data,plant)
+        st.info("Los valores 7/5/3 días provienen del Excel de Pucacaca como ejemplos. Valídalos con Incubación antes de usarlos oficialmente.")
+        with st.form("set_parameters"):
+            a,b,c=st.columns(3)
+            n1=a.number_input("Repro <50 semanas (días)",1,30,value=rules["OBJ_MENOR_50"])
+            n2=b.number_input("Repro 50-59 semanas (días)",1,30,value=rules["OBJ_50_59"])
+            n3=c.number_input("Repro ≥60 semanas (días)",1,30,value=rules["OBJ_60_MAS"])
+            responsible=st.text_input("Aprobado / configurado por *",value=st.session_state.get("operador",""))
+            confirmed=st.checkbox("Confirmo que estos parámetros fueron validados por Incubación")
+            submit=st.form_submit_button("Guardar parámetros",type="primary")
+        if submit:
+            try:
+                if not (responsible.strip() and confirmed):
+                    raise ValueError("Indica responsable y aprobación de los objetivos.")
+                rows=[fields("parametros",{"id_parametro":uid("PAR"),"planta":plant,"clave":key,
+                    "valor":value,"responsable":responsible,"creado_en":stamp()})
+                    for key,value in (("OBJ_MENOR_50",n1),("OBJ_50_59",n2),("OBJ_60_MAS",n3))]
+                batch_write({"parametros":rows})
+                result("Parámetros guardados para "+PLANTAS[plant]+".")
+            except Exception as exc: st.error(str(exc))
+
+
+def show_import(data):
+    header("Importación histórica", "Incorpora los datos anteriores a IT4_* sin sobrescribir otras hojas de Google Sheets.")
+    st.warning("Usa una única fuente de apertura: Excel O versión 3.1. Si ya ingresaste datos en v4 para Pucacaca, se bloquea la migración.")
+    t1,t2 = st.tabs(["Desde Excel original", "Desde IncubaTrack 3.1"])
+    with t1:
+        file=st.file_uploader("Archivo Control Almacen de HI DonPollo.xlsx",type=["xlsx"])
+        if not file:
+            st.info("Selecciona el Excel para una vista previa; no se escribirá nada hasta tu confirmación.")
+            return
+        try:
+            blob=file.getvalue()
+            if len(blob)>12_000_000:
+                raise ValueError("Archivo mayor a 12 MB. Verifica su contenido.")
+            plan=import_excel_plan(blob)
+            a,b,c,d=st.columns(4)
+            a.metric("Recepciones",len(plan["partidas"]))
+            b.metric("Cargas históricas",sum(m["tipo"]=="CARGA" for m in plan["movimientos"]))
+            c.metric("Ingresos HI",fmt(plan["incoming"]))
+            d.metric("Saldo calculado",fmt(plan["balance"]))
+            st.caption("Huella del archivo: "+plan["batch"])
+            if plan["duplicates"]:
+                st.warning(f"{len(plan['duplicates'])} códigos históricos se repiten. Se preservan como recepciones diferentes con IDs internos únicos.")
+            for note in plan["issues"][:20]:
+                st.error(note)
+            if plan["issues"]:
+                st.error("Hay incidencias de lectura; resuélvelas antes de aprobar una migración definitiva.")
+            with st.expander("Vista previa de primeras 15 recepciones"):
+                frame(plan["partidas"][:15],380)
+            existing = [p for p in data["partidas"] if p["planta"]=="PUC"]
+            if existing:
+                st.error(f"La versión 4 ya tiene {len(existing)} recepciones de Pucacaca. Se bloquea la importación para evitar doble conteo.")
+            if not plan["issues"] and not existing:
+                st.info("Para el Excel validado el 03/11/2026, se esperan 227 recepciones, 8 cargas y saldo de 1 221 480 HI.")
+                confirm=st.checkbox("Confirmo que este es el corte correcto y no duplica inventario existente")
+                if st.button("Importar el Excel a IT4_*",type="primary",disabled=not confirm):
+                    fresh=read_fresh()
+                    if any(p["planta"]=="PUC" for p in fresh["partidas"]):
+                        raise ValueError("Otra operación ya creó inventario de Pucacaca. No se importó.")
+                    # Escritura en varias hojas en una solicitud API; no sobrescribe nada.
+                    batch_write({"partidas":plan["partidas"],"movimientos":plan["movimientos"]})
+                    result(f"Excel importado: {len(plan['partidas'])} partidas y {len(plan['movimientos'])} movimientos (incluidos ingresos).")
+        except Exception as exc:
+            st.error(f"No se pudo procesar el Excel: {exc}")
+
+    with t2:
+        st.markdown("**Migra las hojas `HI_PUC_Recepciones` y `HI_PUC_Movimientos` de la versión 3.1.**")
+        st.caption("Es la opción preferible si registraste operaciones posteriores a la elaboración del Excel.")
+        try:
+            plan=read_legacy_v31()
+            if plan is None:
+                st.info("No se encontraron ambas hojas HI_PUC_* de la versión anterior en este Google Sheets.")
+            elif not plan["partidas"]:
+                st.info("Las hojas de la versión anterior todavía no tienen recepciones.")
+            else:
+                a,b,c,d=st.columns(4)
+                a.metric("Recepciones",len(plan["partidas"]))
+                b.metric("Movimientos",len(plan["movimientos"])-len(plan["partidas"]))
+                c.metric("Ingresos",fmt(plan["incoming"]))
+                d.metric("Saldo esperado",fmt(plan["balance"]))
+                for issue in plan["issues"][:20]: st.error(issue)
+                existing=[r for r in data["partidas"] if r["planta"]=="PUC"]
+                if existing:
+                    st.error(f"La versión regional ya tiene {len(existing)} recepciones Pucacaca. Se bloquea migrar nuevamente.")
+                elif not plan["issues"]:
+                    st.info("Los traslados antiguos, si los hay, conservarán su salida histórica sin inventar recepción en Tarapoto.")
+                    confirm=st.checkbox("Confirmo que versión 3.1 contiene toda la actividad de Pucacaca y será la única fuente de apertura",key="migrate_31_ok")
+                    if st.button("Migrar versión 3.1 a Regional 4.0",type="primary",disabled=not confirm):
+                        fresh=read_fresh()
+                        if any(r["planta"]=="PUC" for r in fresh["partidas"]):
+                            raise ValueError("Ya existe inventario de Pucacaca en Regional 4.0.")
+                        # Relee justo antes de guardar para evitar un corte desactualizado.
+                        latest=read_legacy_v31()
+                        if latest is None or latest["importacion_id"] != plan["importacion_id"]:
+                            raise ValueError("Los datos de la versión 3.1 cambiaron. Actualiza y revisa nuevamente.")
+                        batch_write({"partidas":latest["partidas"],"movimientos":latest["movimientos"]})
+                        result(f"Migración terminada: {len(latest['partidas'])} recepciones de Pucacaca.")
+        except Exception as exc:
+            st.error(f"No se pudo preparar la migración de versión 3.1: {exc}")
 
 
 def main():
-    st.set_page_config(page_title="IncubaTrack | Almacén HI Pucacaca", page_icon="🥚", layout="wide", initial_sidebar_state="expanded")
-    st.markdown(STYLE, unsafe_allow_html=True)
-    if tiene_secrets():
-        try:
-            preparar_google()
-        except Exception as exc:
-            st.error(f"No se pudo acceder al archivo Google Sheets: {exc}")
-            st.stop()
     with st.sidebar:
-        st.markdown('<div class="it-brand"><strong>INCUBATRACK <span style="color:#df6b22;display:inline;font-size:1rem">HI</span></strong><span>P.I. Pucacaca · Gestión de almacén</span></div>',unsafe_allow_html=True)
-        if tiene_secrets():
-            st.caption("Datos persistentes · Google Sheets")
-        else:
-            st.warning("Modo demo · sin almacenamiento permanente", icon="⚠️")
-        st.markdown('<span class="it-overline">Navegación</span>', unsafe_allow_html=True)
-        paginas = ["Centro de control", "Recepciones HI", "Existencias y saldos", "Carga por incubadora",
-                    "Transferencias a Tarapoto", "Bajas y ajustes", "Conciliación física",
-                    "Trazabilidad y auditoría", "Importar Excel y parámetros"]
-        pagina = st.radio("Páginas", paginas, label_visibility="collapsed")
+        st.markdown("### 🥚 IncubaTrack")
+        st.caption("REGIONAL 4.0 · DON POLLO")
         st.divider()
-        st.markdown('<span class="it-overline">Contexto de análisis</span>',unsafe_allow_html=True)
-        corte = st.date_input("Fecha de corte", value=date.today(), max_value=date.today(), key="corte_global")
-        operador = st.text_input("Operador / responsable", key="operador", placeholder="Nombre para prellenar registros")
-        with st.expander("Objetivos (provisionales)"):
-            dias1 = st.number_input("<50 semanas (días)", min_value=1, max_value=30, value=7, key="d_7")
-            dias2 = st.number_input("50–59 semanas (días)", min_value=1, max_value=30, value=5, key="d_5")
-            dias3 = st.number_input("≥60 semanas (días)", min_value=1, max_value=30, value=3, key="d_3")
-        st.markdown('<div class="it-note">Fuente: movimientos y recepciones. Un único saldo calculado, sin ediciones directas.<br>Control de Gestión · Don Pollo</div>', unsafe_allow_html=True)
+        scope=st.selectbox("Ámbito de visualización",["REG",*PLANTAS],
+               format_func=lambda c:"Todas las plantas" if c=="REG" else PLANTAS[c])
+        st.text_input("Responsable de operaciones",key="operador",placeholder="Nombre y apellido")
+        st.divider()
+        pages=["Centro de control","Existencias","Recepciones HI","Cargas por incubadora",
+               "Transferencias","Bajas y ajustes","Conciliación física","Trazabilidad","Kardex / Auditoría",
+               "Catálogos y reglas","Importación histórica"]
+        page=st.radio("Navegación",pages,label_visibility="collapsed")
+        st.divider()
+        st.caption("Fuente: Google Sheets centralizado")
+        if st.button("Actualizar datos", use_container_width=True):
+            read_sheets.clear()
+            st.rerun()
+        st.caption("Los registros no sustituyen el control de accesos. Identificación de operadores: pendiente de implementar.")
     try:
-        registros = cargar_registros()
-        reglas = (int(dias1),int(dias2),int(dias3))
-        inv = inventario(registros["recepciones"],registros["movimientos"],corte,reglas)
-        if st.session_state.get("flash"):
-            st.toast(st.session_state.pop("flash"))
-        if pagina == paginas[0]: presentar_dashboard(registros, inv, corte, reglas)
-        elif pagina == paginas[1]: presentar_recepciones(registros, inv, corte)
-        elif pagina == paginas[2]: presentar_existencias(registros, inv, corte)
-        elif pagina == paginas[3]: presentar_cargas(registros, inv, corte)
-        elif pagina == paginas[4]: presentar_transferencias(registros, inv, corte)
-        elif pagina == paginas[5]: presentar_ajustes(registros, inv, corte)
-        elif pagina == paginas[6]: presentar_conciliacion(registros, inv, corte)
-        elif pagina == paginas[7]: presentar_historial(registros, inv, corte)
-        else: presentar_importacion(registros, inv, corte, reglas)
+        setup()
+        data=read_sheets()
     except Exception as exc:
-        st.error(f"No fue posible cargar la operación: {exc}")
-        st.exception(exc)
-    st.markdown('<p class="it-note" style="margin-top:26px;text-align:center">IncubaTrack · Inventario HI · P.I. Pucacaca · Control de Gestión</p>',unsafe_allow_html=True)
+        header("Conexión a Google Sheets", "La aplicación requiere acceso de editor del servicio de Google Cloud al documento.")
+        st.error(str(exc))
+        st.code('SPREADSHEET_ID = "TU_ID_DE_GOOGLE_SHEETS"\n\n[gcp_service_account]\n# Conserva tus credenciales actuales', language="toml")
+        st.stop()
+    if "notice" in st.session_state:
+        st.success(st.session_state.pop("notice"))
+    if page=="Centro de control": show_dashboard(data,scope)
+    elif page=="Existencias": show_inventory(data,scope)
+    elif page=="Recepciones HI": show_receipts(data,scope)
+    elif page=="Cargas por incubadora": show_loads(data,scope)
+    elif page=="Transferencias": show_transfers(data,scope)
+    elif page=="Bajas y ajustes": show_adjustment(data,scope)
+    elif page=="Conciliación física": show_count(data,scope)
+    elif page=="Trazabilidad": show_trace(data,scope)
+    elif page=="Kardex / Auditoría": show_audit(data,scope)
+    elif page=="Catálogos y reglas": show_catalogs(data,scope)
+    elif page=="Importación histórica": show_import(data)
+    st.caption("Control de Gestión · IncubaTrack Regional 4.0 | Google Sheets. Uso piloto: evitar operaciones simultáneas sobre las mismas partidas.")
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
