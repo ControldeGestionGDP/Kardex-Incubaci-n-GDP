@@ -1,4 +1,4 @@
-"""IncubaTrack Regional 4.0 | Don Pollo
+"""IncubaTrack Regional 4.1 | Don Pollo
 
 Streamlit + un Google Sheets para Tarapoto, Pucacaca y Loreto.
 No utiliza SQL. No sobrescribe hojas antiguas: crea IT4_*.
@@ -318,14 +318,14 @@ def legacy_v31_plan(old_receipts, old_moves):
 
 
 def read_legacy_v31():
+    """Lee las dos hojas antiguas en una única solicitud de lectura."""
     book = workbook()
     existing = {s.title for s in book.worksheets()}
     names = ("HI_PUC_Recepciones", "HI_PUC_Movimientos")
     if not all(n in existing for n in names):
         return None
     result = []
-    for name in names:
-        values = book.worksheet(name).get_all_values()
+    for values in batch_values(names, book=book):
         if not values:
             result.append([])
             continue
@@ -349,8 +349,27 @@ def workbook():
         raise RuntimeError(f"No se pudo abrir Google Sheets: {exc}") from exc
 
 
+def batch_values(names, *, book=None, first_two=False):
+    """Consulta muchas pestañas en UNA lectura (Sheets values.batchGet).
+
+    El orden de valueRanges coincide con el de ranges, incluso si una hoja está vacía.
+    """
+    book = book if book is not None else workbook()
+    ranges = [f"'{name}'!A1:Z2" if first_two else f"'{name}'" for name in names]
+    response = book.values_batch_get(ranges, params={"valueRenderOption": "FORMATTED_VALUE"})
+    value_ranges = response.get("valueRanges", [])
+    if len(value_ranges) != len(names):
+        raise RuntimeError("Google Sheets devolvió una respuesta incompleta. No se usarán datos parciales.")
+    return [entry.get("values", []) for entry in value_ranges]
+
+
 @st.cache_resource(show_spinner=False)
 def setup():
+    """Inicializa tablas y verifica las 10 cabeceras con una sola lectura.
+
+    Se conserva el mapa de hojas en memoria para que las escrituras no vuelvan a
+    consultar metadatos en cada operación.
+    """
     book = workbook()
     sheets = {s.title: s for s in book.worksheets()}
     for name, headers in TABLAS.values():
@@ -358,16 +377,22 @@ def setup():
             w = book.add_worksheet(title=name, rows=3000, cols=len(headers))
             w.append_row(headers, value_input_option="RAW")
             sheets[name] = w
-        elif sheets[name].row_values(1) != headers:
+    names = [name for name, _ in TABLAS.values()]
+    preview = dict(zip(names, batch_values(names, book=book, first_two=True)))
+    for name, headers in TABLAS.values():
+        if not preview[name] or preview[name][0] != headers:
             raise RuntimeError(f"Los encabezados de '{name}' no coinciden con esta versión. No se modificarán.")
-    if len(sheets[TABLAS["plantas"][0]].get_all_values()) == 1:
-        batch_write({"plantas": [{"id_planta": code, "nombre": nombre, "activo": "SI"}
-                                 for code, nombre in PLANTAS.items()]}, book=book, sheet_map=sheets)
-    if len(sheets[TABLAS["almacenes"][0]].get_all_values()) == 1:
-        batch_write({"almacenes": [{"id_almacen": f"ALM-{code}", "id_planta": code,
-                         "nombre": "Almacén principal (provisional)", "activo": "SI", "creado_en": stamp()}
-                        for code in PLANTAS]}, book=book, sheet_map=sheets)
-    return True
+    initial_rows = {}
+    if len(preview[TABLAS["plantas"][0]]) == 1:
+        initial_rows["plantas"] = [{"id_planta": code, "nombre": nombre, "activo": "SI"}
+                                   for code, nombre in PLANTAS.items()]
+    if len(preview[TABLAS["almacenes"][0]]) == 1:
+        initial_rows["almacenes"] = [{"id_almacen": f"ALM-{code}", "id_planta": code,
+                                       "nombre": "Almacén principal (provisional)",
+                                       "activo": "SI", "creado_en": stamp()} for code in PLANTAS]
+    if initial_rows:
+        batch_write(initial_rows, book=book, sheet_map=sheets)
+    return sheets
 
 
 def cell_value(v):
@@ -383,8 +408,9 @@ def cell_value(v):
 
 def batch_write(groups, book=None, sheet_map=None):
     """Un API batchUpdate: agregar filas en varias hojas en una sola solicitud."""
-    book = book or workbook()
-    sheet_map = sheet_map or {s.title: s for s in book.worksheets()}
+    book = book if book is not None else workbook()
+    # setup() está en caché y conserva los IDs. No pedir worksheets() al escribir.
+    sheet_map = sheet_map if sheet_map is not None else setup()
     requests = []
     for kind, rows in groups.items():
         if not rows:
@@ -400,15 +426,23 @@ def batch_write(groups, book=None, sheet_map=None):
         read_sheets.clear()
 
 
-@st.cache_data(ttl=12, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def read_sheets():
-    book = workbook()
+    """Un solo batchGet para todas las tablas, con caché compartida 60 segundos.
+
+    Las escrituras invalidan esta caché y los formularios críticos fuerzan una
+    relectura antes de comprobar stock.
+    """
     result = blank()
-    for kind, (name, cols) in TABLAS.items():
-        values = book.worksheet(name).get_all_values()
-        if values:
-            result[kind] = [dict(zip(cols, (row + [""] * len(cols))[:len(cols)])) for row in values[1:]
-                            if any(txt(v) for v in row)]
+    names = [name for name, _ in TABLAS.values()]
+    groups = batch_values(names)
+    for (kind, (_, cols)), values in zip(TABLAS.items(), groups):
+        if not values:
+            continue
+        if values[0] != cols:
+            raise RuntimeError(f"Encabezados inesperados en {TABLAS[kind][0]}; lectura cancelada.")
+        result[kind] = [dict(zip(cols, (row + [""] * len(cols))[:len(cols)]))
+                        for row in values[1:] if any(txt(v) for v in row)]
     return result
 
 
@@ -1309,7 +1343,7 @@ def show_import(data):
 def main():
     with st.sidebar:
         st.markdown("### 🥚 IncubaTrack")
-        st.caption("REGIONAL 4.0 · DON POLLO")
+        st.caption("REGIONAL 4.1 · DON POLLO")
         st.divider()
         scope=st.selectbox("Ámbito de visualización",["REG",*PLANTAS],
                format_func=lambda c:"Todas las plantas" if c=="REG" else PLANTAS[c])
@@ -1329,9 +1363,22 @@ def main():
         setup()
         data=read_sheets()
     except Exception as exc:
-        header("Conexión a Google Sheets", "La aplicación requiere acceso de editor del servicio de Google Cloud al documento.")
-        st.error(str(exc))
-        st.code('SPREADSHEET_ID = "TU_ID_DE_GOOGLE_SHEETS"\n\n[gcp_service_account]\n# Conserva tus credenciales actuales', language="toml")
+        header("Conexión a Google Sheets", "Estado de la conexión y lectura de datos regionales.")
+        message = str(exc)
+        is_quota = ("429" in message or "quota exceeded" in message.lower()
+                    or "resource_exhausted" in message.lower())
+        if is_quota:
+            st.warning("Google Sheets alcanzó temporalmente el límite de lecturas de la cuenta de servicio.")
+            st.info("Es un límite de solicitudes, no un error de credenciales ni una pérdida de inventario. "
+                    "Evita actualizar repetidamente la página; la cuota se renueva por minuto. "
+                    "Si otras aplicaciones usan la misma cuenta de Google Cloud, también comparten su cuota.")
+            if st.button("Reintentar conexión", type="primary"):
+                read_sheets.clear()
+                st.rerun()
+        else:
+            st.error(message)
+            st.caption("Revisa el SPREADSHEET_ID y los permisos de Editor del correo de servicio "
+                       "solo si el error indica credenciales, permisos o acceso.")
         st.stop()
     if "notice" in st.session_state:
         st.success(st.session_state.pop("notice"))
@@ -1346,7 +1393,7 @@ def main():
     elif page=="Kardex / Auditoría": show_audit(data,scope)
     elif page=="Catálogos y reglas": show_catalogs(data,scope)
     elif page=="Importación histórica": show_import(data)
-    st.caption("Control de Gestión · IncubaTrack Regional 4.0 | Google Sheets. Uso piloto: evitar operaciones simultáneas sobre las mismas partidas.")
+    st.caption("Control de Gestión · IncubaTrack Regional 4.1 | Google Sheets. Uso piloto: evitar operaciones simultáneas sobre las mismas partidas.")
 
 
 if __name__=="__main__":
