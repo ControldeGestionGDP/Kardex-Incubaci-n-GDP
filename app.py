@@ -1,1067 +1,1155 @@
-"""IncubaTrack 2.0 | Trazabilidad de huevo incubable entre plantas.
+"""IncubaTrack | P.I. Pucacaca - Almacén de huevos incubables.
 
-Requisitos: streamlit, pandas, gspread, google-auth, xlsxwriter.
-Conserva intactas las hojas originales «lotes» y «movimientos».
-Escritura exclusiva en: traz_lotes_v2, traz_eventos_v2,
-traz_traslados_v2 y traz_recepciones_v2.
+Streamlit + Google Sheets (hojas nuevas separadas) y modo demo temporal.
+Importa el Excel «Control Almacen de HI DonPollo.xlsx» SIN alterar el archivo.
 
-IMPORTANTE: Google Sheets no garantiza transacciones multihoja ni bloqueos
-entre usuarios. La app usa operaciones idempotentes y un panel de incidencias,
-pero para múltiples operadores concurrentes se recomienda PostgreSQL.
+Regla de negocio: saldo = ingresos + sumatoria de movimientos firmados.
+Las clases OK / R / RR son independientes. Una carga es SALIDA de almacén;
+el paso incubadora -> nacedora no es un nuevo movimiento de almacén.
+
+LIMITACIÓN: Google Sheets no dispone de transacciones o bloqueo multiusuario.
+Para operación con varios operadores simultáneos se recomienda PostgreSQL.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, time as dt_time
-from html import escape
-from io import BytesIO
-import json
-from uuid import uuid4
+import collections
+import hashlib
+import html
+import io
+import re
+import uuid
+import zipfile
+import xml.etree.ElementTree as ET
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import gspread
 import pandas as pd
 import streamlit as st
-from google.oauth2.service_account import Credentials
 
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except ImportError:
+    gspread = None
+    Credentials = None
 
-# ─────────────────────────────── CONFIGURACIÓN ────────────────────────────────
-st.set_page_config(page_title="IncubaTrack 2.0 · Trazabilidad", page_icon="🥚", layout="wide", initial_sidebar_state="expanded")
 TZ = ZoneInfo("America/Lima")
-PLANTAS = ["P.I. Tarapoto", "P.I. Pucacaca", "P.I. Iquitos"]
-DESCRIPCIONES = ["HUEVO INCUBABLE PREMIUM", "HUEVO INCUBABLE NO PREMIUM"]
-GENETICAS = ["Cobb 500", "Ross 308", "Hubbard", "Sin Datos"]
-ID_PLANILLA_DEFAULT = "13nw5vYfEFnP3RjHXK7CC7124-MDKCe-iAwfycvTUeS0"
-HOJAS = {
-    "traz_lotes_v2": [
-        "id_lote", "id_raiz", "id_padre", "lote_nro", "procedencia", "planta",
-        "granja", "descripcion", "genetica", "edad_repro", "fecha_postura",
-        "fecha_llegada", "cantidad_origen", "obs_sanitarias", "origen_registro", "fecha_creacion", "creado_por",
-    ],
-    "traz_eventos_v2": [
-        "id_evento", "id_lote", "id_raiz", "tipo", "cantidad", "variacion",
-        "planta", "planta_contraparte", "id_traslado", "referencia",
-        "fecha_evento", "responsable", "observaciones", "metadata_json",
-    ],
-    "traz_traslados_v2": [
-        "id_traslado", "id_lote_origen", "id_lote_destino", "id_raiz", "lote_nro",
-        "planta_origen", "planta_destino", "cantidad_enviada", "fecha_envio",
-        "guia", "transportista", "placa", "logtag", "temperatura_salida",
-        "observaciones", "responsable", "creado_en",
-    ],
-    "traz_recepciones_v2": [
-        "id_recepcion", "id_traslado", "id_lote_destino", "fecha_recepcion",
-        "cantidad_aceptada", "cantidad_rechazada", "cantidad_faltante",
-        "temperatura_llegada", "condicion", "observaciones", "responsable", "creado_en",
-    ],
-}
+PLANTA = "P.I. Pucacaca"
+DESTINO = "P.I. Tarapoto"
+HI_POR_CAJA = 360
+TIPOS_HI = ("OK", "R", "RR")
+TIPOS_MOV = ("CARGA", "TRANSFERENCIA", "BAJA", "AJUSTE +", "AJUSTE -")
+ORIGENES = ("Granja", "Transferencia recibida", "Saldo inicial", "Otro")
+NAMESPACE = uuid.UUID("e812b4ba-3c87-4ca5-a687-507555714918")
 
-st.markdown("""
-<style>
-[data-testid="stAppViewContainer"] {background:#f7f9fc;}
-.block-container {padding-top:1.25rem; padding-bottom:3.5rem;max-width:1500px;}
-[data-testid="stSidebar"] {background:#ffffff; border-right:1px solid #e5eaf1;}
-[data-testid="stSidebar"] * {color:#253447;}
-h1,h2,h3 {color:#183b5b; letter-spacing:-.025em;}
-h1 {font-size:1.85rem !important;}
-[data-testid="stMetric"] {background:#fff;border:1px solid #e6ebf2;border-radius:12px;
- padding:14px 17px;box-shadow:0 2px 8px rgba(19,54,93,.035);}
-[data-testid="stMetricLabel"]{color:#697a8d;}
-[data-testid="stMetricValue"] {color:#163f60;}
-div[data-testid="stVerticalBlockBorderWrapper"] > div {border-color:#e6ebf2;}
-.stButton > button[kind="primary"] {background:#0b628c;border-color:#0b628c;}
-.stButton > button {border-radius:9px;}
-.section-intro {font-size:.9rem;color:#65778a;margin:-7px 0 18px;}
-.smallnote {color:#6a7b8c;font-size:.78rem;}
-.kicker {color:#0b628c;font-weight:700;font-size:.72rem;letter-spacing:.10em;text-transform:uppercase;}
-hr {border-color:#e7ebf1;}
-</style>
-""", unsafe_allow_html=True)
+RECEPCION = [
+    "id_recepcion", "lote", "fecha_postura", "edad_repro", "tipo_hi",
+    "fecha_ingreso", "cantidad_hi", "ubicacion", "guia_recepcion", "origen",
+    "responsable", "observacion", "codigo_excel", "fila_excel", "creado_en", "importacion_id",
+]
+MOVIMIENTO = [
+    "id_movimiento", "id_operacion", "fecha_movimiento", "tipo", "id_recepcion",
+    "cantidad_hi", "variacion_hi", "incubadora", "destino", "documento",
+    "responsable", "causa", "observacion", "transportista", "placa",
+    "logtag", "creado_en", "importacion_id", "fila_excel",
+]
+CONTEO = [
+    "id_conteo", "fecha_conteo", "id_recepcion", "saldo_sistema",
+    "conteo_fisico", "diferencia", "documento", "responsable", "observacion", "creado_en",
+]
+CONFIRMACION = [
+    "id_confirmacion", "id_operacion", "fecha_recepcion", "recibidos_hi", "rechazados_hi",
+    "faltantes_hi", "documento", "responsable", "observacion", "creado_en",
+]
+SHEETS = {
+    "HI_PUC_Recepciones": RECEPCION,
+    "HI_PUC_Movimientos": MOVIMIENTO,
+    "HI_PUC_Conteos": CONTEO,
+    "HI_PUC_Confirmaciones": CONFIRMACION,
+}
+MAP_SHEET = {"recepciones": "HI_PUC_Recepciones", "movimientos": "HI_PUC_Movimientos",
+             "conteos": "HI_PUC_Conteos", "confirmaciones": "HI_PUC_Confirmaciones"}
 
 
 def ahora() -> datetime:
     return datetime.now(TZ)
 
 
-def sello() -> str:
+def timestamp() -> str:
     return ahora().isoformat(timespec="seconds")
 
 
-def fecha_iso(valor) -> str:
-    if isinstance(valor, date):
-        return valor.isoformat()
-    return str(valor).strip()
+def new_id(prefix: str) -> str:
+    return f"{prefix}-{ahora():%y%m%d}-{uuid.uuid4().hex[:10].upper()}"
 
 
-def momento(fecha: date, hora: dt_time) -> str:
-    return datetime.combine(fecha, hora, TZ).isoformat(timespec="seconds")
-
-
-def entero(valor, predeterminado=0) -> int:
+def i_num(v, default=0) -> int:
     try:
-        if valor is None or str(valor).strip() == "":
-            return predeterminado
-        return int(round(float(str(valor).replace(",", ""))))
-    except (TypeError, ValueError):
-        return predeterminado
+        if v is None or str(v).strip() == "":
+            return default
+        n = float(str(v).replace(",", ""))
+        if n != n or not n.is_integer():
+            return default
+        return int(n)
+    except (ValueError, TypeError, OverflowError):
+        return default
 
 
-def seguro(valor) -> str:
-    return escape(str(valor if valor is not None else ""))
+def plain(v) -> str:
+    return str(v if v is not None else "").strip()
 
 
-def dias_desde(fecha, hoy=None):
-    d = pd.to_datetime(fecha, errors="coerce")
-    if pd.isna(d):
+def clean_lote(v) -> str:
+    s = plain(v)
+    if re.fullmatch(r"[0-9]+(?:\.0+)?", s):
+        return str(int(float(s)))
+    return s.upper()
+
+
+def date_iso(v) -> str:
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    s = plain(v)
+    try:
+        return datetime.fromisoformat(s).date().isoformat()
+    except ValueError:
+        return s[:10]
+
+
+def parse_date(v) -> date | None:
+    try:
+        return date.fromisoformat(date_iso(v))
+    except (ValueError, TypeError):
         return None
-    return ((hoy or ahora().date()) - d.date()).days
 
 
-def id_nuevo(prefijo: str) -> str:
-    return f"{prefijo}-{ahora():%y%m%d}-{uuid4().hex[:10].upper()}"
+def date_excel(v, mantener_hora=False) -> str:
+    if isinstance(v, (int, float)):
+        try:
+            fecha = datetime(1899, 12, 30) + timedelta(days=float(v))
+            if mantener_hora and fecha.time().hour + fecha.time().minute + fecha.time().second:
+                return fecha.isoformat(timespec="seconds")
+            return fecha.date().isoformat()
+        except (ValueError, OverflowError):
+            return ""
+    if isinstance(v, str):
+        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(v.strip(), fmt).date().isoformat()
+            except ValueError:
+                pass
+        return date_iso(v)
+    return ""
 
 
-def clave_borrador(nombre: str, prefijo: str):
-    clave = f"borrador_{nombre}"
-    if clave not in st.session_state:
-        st.session_state[clave] = id_nuevo(prefijo)
-    return st.session_state[clave]
+def datetime_postura(v) -> datetime | None:
+    if isinstance(v, datetime):
+        return v.replace(tzinfo=None)
+    if isinstance(v, date):
+        return datetime.combine(v, datetime.min.time())
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(str(v).strip()).replace(tzinfo=None)
+    except ValueError:
+        return None
 
 
-def nuevo_borrador(nombre: str, prefijo: str):
-    st.session_state[f"borrador_{nombre}"] = id_nuevo(prefijo)
+def etiqueta_postura(v) -> str:
+    fecha = datetime_postura(v)
+    if fecha is None:
+        return plain(v)
+    return fecha.strftime("%Y-%m-%d %H:%M") if fecha.hour or fecha.minute else fecha.date().isoformat()
 
 
-def exito_y_recargar(texto: str):
-    st.session_state["mensaje_exito"] = texto
-    cargar_tabla.clear()
-    st.rerun()
+def num_format(v) -> str:
+    return f"{i_num(v):,}".replace(",", " ")
 
 
-def normalizar_procedencia(lote: str) -> str:
-    t = lote.upper().strip()
-    if t.isdigit():
-        return "CDG"
-    if "SF" in t:
-        return "San Fernando"
-    if "SE" in t:
-        return "Santa Elena"
-    return "Otros"
+def classify_age(edad: int, rules: tuple[int, int, int]) -> int:
+    return rules[0] if edad < 50 else (rules[1] if edad < 60 else rules[2])
 
 
-def excel_hojas(datos: dict[str, pd.DataFrame]) -> bytes:
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
-        for nombre, df in datos.items():
-            nombre_hoja = nombre[:31]
-            df.to_excel(writer, sheet_name=nombre_hoja, index=False)
-            hoja = writer.sheets[nombre_hoja]
-            hoja.freeze_panes(1, 0)
-            hoja.set_row(0, 23, writer.book.add_format({"bold": True, "bg_color": "#153e5c", "font_color": "#ffffff"}))
-            for j, col in enumerate(df.columns):
-                hoja.set_column(j, j, min(max(len(str(col)) + 3, 14), 36))
-    return buffer.getvalue()
+def inventario(recepciones: list[dict], movimientos: list[dict], corte: date,
+               reglas: tuple[int, int, int] = (7, 5, 3)) -> list[dict]:
+    """Inventario al corte, basado solo en eventos, sin escribir saldos."""
+    cambios = collections.defaultdict(int)
+    for m in movimientos:
+        fecha = parse_date(m.get("fecha_movimiento"))
+        if fecha and fecha <= corte:
+            cambios[plain(m.get("id_recepcion"))] += i_num(m.get("variacion_hi"))
+    salida = []
+    for r in recepciones:
+        fi = parse_date(r.get("fecha_ingreso"))
+        fp = datetime_postura(r.get("fecha_postura"))
+        if not fi or fi > corte:
+            continue
+        cantidad = i_num(r.get("cantidad_hi"))
+        saldo = cantidad + cambios.get(plain(r.get("id_recepcion")), 0)
+        edad = i_num(r.get("edad_repro"))
+        objetivo = classify_age(edad, reglas) if edad > 0 else None
+        dias = round((datetime.combine(corte, datetime.min.time()) - fp).total_seconds() / 86400, 2) if fp else None
+        faltan = objetivo - dias if objetivo is not None and dias is not None else None
+        estado = ("Sin saldo" if saldo == 0 else "Saldo negativo" if saldo < 0 else
+                  "Sin fecha" if faltan is None else
+                  "Objetivo superado" if faltan < 0 else
+                  "Cargar hoy" if faltan == 0 else
+                  "Próximo objetivo" if faltan <= 1 else "En plazo")
+        salida.append({
+            "id_recepcion": plain(r.get("id_recepcion")),
+            "lote": clean_lote(r.get("lote")),
+            "fecha_postura": plain(r.get("fecha_postura")),
+            "edad_repro": edad,
+            "tipo_hi": plain(r.get("tipo_hi")).upper(),
+            "fecha_ingreso": date_iso(r.get("fecha_ingreso")),
+            "guia_recepcion": plain(r.get("guia_recepcion")),
+            "ubicacion": plain(r.get("ubicacion")),
+            "origen": plain(r.get("origen")),
+            "responsable": plain(r.get("responsable")),
+            "codigo_excel": plain(r.get("codigo_excel")),
+            "ingresos_hi": cantidad,
+            "movimientos_hi": cambios.get(plain(r.get("id_recepcion")), 0),
+            "saldo_hi": saldo,
+            "cajas": max(0, saldo) // HI_POR_CAJA,
+            "adicionales": max(0, saldo) % HI_POR_CAJA,
+            "dias_postura": dias,
+            "objetivo_dias": objetivo,
+            "dias_restantes": faltan,
+            "estado": estado,
+        })
+    return salida
 
 
-# ─────────────────────────────── PERSISTENCIA ────────────────────────────────
+def estadisticas(inventario_rows: list[dict], movimientos: list[dict], corte: date) -> dict:
+    r = inventario_rows
+    vistos = {x["id_recepcion"] for x in r}
+    mv = [m for m in movimientos if plain(m.get("id_recepcion")) in vistos and
+          (d := parse_date(m.get("fecha_movimiento"))) and d <= corte]
+    saldos = sum(x["saldo_hi"] for x in r)
+    return {
+        "ingresos": sum(x["ingresos_hi"] for x in r),
+        "saldo": saldos,
+        "cargados": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "CARGA"),
+        "transferidos": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "TRANSFERENCIA"),
+        "bajas": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "BAJA"),
+        "ajustes_mas": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "AJUSTE +"),
+        "ajustes_menos": sum(i_num(m.get("cantidad_hi")) for m in mv if plain(m.get("tipo")) == "AJUSTE -"),
+        "prioridad": sum(x["saldo_hi"] for x in r if x["saldo_hi"] > 0 and x["estado"] in ("Objetivo superado", "Cargar hoy", "Próximo objetivo")),
+        "grupos": sum(x["saldo_hi"] > 0 for x in r),
+        "cajas": max(0, saldos) // HI_POR_CAJA,
+        "adicionales": max(0, saldos) % HI_POR_CAJA,
+        "promedio_dias": round(sum(x["dias_postura"] * x["saldo_hi"] for x in r if x["dias_postura"] is not None and x["saldo_hi"] > 0) /
+                               sum(x["saldo_hi"] for x in r if x["saldo_hi"] > 0), 1) if any(x["saldo_hi"] > 0 for x in r) else 0,
+    }
+
+
+def validar_movimientos(nuevos: list[dict], registros: dict, corte: date) -> None:
+    if not nuevos:
+        raise ValueError("Seleccione cantidades superiores a cero.")
+    existentes = registros["movimientos"]
+    ids = {plain(m.get("id_movimiento")) for m in existentes}
+    if any(plain(m.get("id_movimiento")) in ids for m in nuevos):
+        raise ValueError("La operación ya fue registrada. Actualice la página para ver el resultado.")
+    totales = collections.defaultdict(int)
+    estado = {r["id_recepcion"]: r for r in inventario(registros["recepciones"], existentes, corte)}
+    for m in nuevos:
+        tipo = plain(m.get("tipo"))
+        cantidad = i_num(m.get("cantidad_hi"))
+        if tipo not in TIPOS_MOV or cantidad <= 0:
+            raise ValueError("Tipo de movimiento o cantidad inválida.")
+        if date_iso(m.get("fecha_movimiento")) != corte.isoformat():
+            raise ValueError("El movimiento debe validarse contra su fecha operativa.")
+        rid = plain(m.get("id_recepcion"))
+        if rid not in estado:
+            raise ValueError("La recepción no existe al corte de la operación.")
+        if not plain(m.get("documento")) or not plain(m.get("responsable")):
+            raise ValueError("El documento y el responsable son obligatorios.")
+        if tipo == "CARGA" and not plain(m.get("incubadora")):
+            raise ValueError("Indique la incubadora de cada carga.")
+        if tipo == "TRANSFERENCIA" and plain(m.get("destino")) != DESTINO:
+            raise ValueError("En esta etapa solo se registran transferencias a P.I. Tarapoto.")
+        if tipo in ("AJUSTE +", "AJUSTE -", "BAJA") and not plain(m.get("causa")):
+            raise ValueError("Los ajustes y bajas requieren un motivo o causa.")
+        variacion = cantidad if tipo == "AJUSTE +" else -cantidad
+        if i_num(m.get("variacion_hi")) != variacion:
+            raise ValueError("La variación no coincide con el tipo de operación.")
+        totales[rid] += variacion
+    for rid, delta in totales.items():
+        if estado[rid]["saldo_hi"] + delta < 0:
+            raise ValueError(f"Saldo insuficiente para lote {estado[rid]['lote']} / recepción {rid}.")
+    # También validar todos los saldos cronológicos posteriores: una operación
+    # retroactiva no debe dejar el almacén negativo tras cargas más recientes.
+    cambios = set(totales)
+    base = {r["id_recepcion"]: r for r in registros["recepciones"]
+            if plain(r.get("id_recepcion")) in cambios}
+    for rid in cambios:
+        rec = base.get(rid)
+        if not rec:
+            raise ValueError("No se encontró la recepción vinculada.")
+        balance = i_num(rec.get("cantidad_hi"))
+        fecha_ingreso = parse_date(rec.get("fecha_ingreso"))
+        por_dia = collections.defaultdict(int)
+        for m in existentes + nuevos:
+            if plain(m.get("id_recepcion")) != rid:
+                continue
+            d = parse_date(m.get("fecha_movimiento"))
+            if not d or (fecha_ingreso and d < fecha_ingreso):
+                raise ValueError("Existe un movimiento sin fecha válida o anterior a su recepción.")
+            por_dia[d] += i_num(m.get("variacion_hi"))
+        for fecha in sorted(por_dia):
+            balance += por_dia[fecha]
+            if balance < 0:
+                raise ValueError(f"Saldo insuficiente: el lote {estado[rid]['lote']} quedaría negativo al {fecha}.")
+
+
+def incidencias(registros: dict, inv_rows: list[dict]) -> list[dict]:
+    lista = []
+    ids = collections.Counter(plain(r.get("id_recepcion")) for r in registros["recepciones"])
+    codigos = collections.Counter(plain(r.get("codigo_excel")) for r in registros["recepciones"]
+                                  if plain(r.get("codigo_excel")))
+    for code, n in codigos.items():
+        if n > 1:
+            lista.append({"Severidad": "Revisar", "Área": "Recepciones", "Referencia": code,
+                          "Observación": f"Código histórico repetido en {n} recepciones; se conservaron con IDs independientes."})
+    for k, n in ids.items():
+        if n > 1:
+            lista.append({"Severidad": "Crítico", "Área": "Recepciones", "Referencia": k,
+                          "Observación": "ID interno duplicado; verificar escritura."})
+    recep_ids = {r["id_recepcion"] for r in inv_rows}
+    for m in registros["movimientos"]:
+        rid = plain(m.get("id_recepcion"))
+        referencia = plain(m.get("id_operacion")) or plain(m.get("id_movimiento"))
+        if rid not in {plain(r.get("id_recepcion")) for r in registros["recepciones"]}:
+            lista.append({"Severidad": "Crítico", "Área": "Movimientos", "Referencia": referencia, "Observación": "ID de recepción inexistente."})
+        if not plain(m.get("documento")):
+            lista.append({"Severidad": "Revisar", "Área": "Movimientos", "Referencia": referencia,
+                          "Observación": "Falta documento de movimiento."})
+        if plain(m.get("tipo")) == "CARGA" and not plain(m.get("incubadora")):
+            lista.append({"Severidad": "Revisar", "Área": "Cargas", "Referencia": referencia,
+                          "Observación": "Falta identificación de incubadora."})
+    for r in inv_rows:
+        if r["saldo_hi"] < 0:
+            lista.append({"Severidad": "Crítico", "Área": "Saldos", "Referencia": r["id_recepcion"],
+                          "Observación": "Saldo negativo."})
+    return lista
+
+
+# ─────────────── EXCEL: LECTURA DEL ARCHIVO SIN CAMBIOS ───────────────
+XML_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+
+def leer_filas_xlsx(contenido: bytes, nombre_hoja: str) -> list[dict]:
+    """Lee los valores cacheados de XLSX, incluidos ID calculados por fórmulas."""
+    with zipfile.ZipFile(io.BytesIO(contenido)) as z:
+        workbook = ET.fromstring(z.read("xl/workbook.xml"))
+        relaciones = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+        targets = {x.attrib["Id"]: x.attrib["Target"] for x in relaciones}
+        sheet = next((x for x in workbook.iter(f"{{{XML_NS}}}sheet") if x.attrib.get("name") == nombre_hoja), None)
+        if sheet is None:
+            raise ValueError(f"La hoja requerida '{nombre_hoja}' no existe en el Excel.")
+        ident = sheet.attrib[f"{{{REL_NS}}}id"]
+        target = targets.get(ident, "")
+        path = target.lstrip("/") if target.startswith("/") else "xl/" + target
+        if ".." in path.split("/"):
+            raise ValueError("Ruta de hoja inválida.")
+        strings = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            string_root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            strings = ["".join(t.text or "" for t in si.iter(f"{{{XML_NS}}}t"))
+                       for si in string_root.findall(f"{{{XML_NS}}}si")]
+        xml = ET.fromstring(z.read(path))
+        resultado = []
+        for row in xml.findall(f".//{{{XML_NS}}}sheetData/{{{XML_NS}}}row"):
+            nr = int(row.attrib.get("r", "0"))
+            registro = {"_fila": nr}
+            for c in row.findall(f"{{{XML_NS}}}c"):
+                col = re.match(r"[A-Z]+", c.attrib.get("r", ""))
+                if not col:
+                    continue
+                v = c.find(f"{{{XML_NS}}}v")
+                tipo = c.attrib.get("t", "")
+                raw = v.text if v is not None else None
+                if tipo == "s" and raw is not None:
+                    raw = strings[int(raw)]
+                elif tipo == "inlineStr":
+                    raw = "".join(t.text or "" for t in c.iter(f"{{{XML_NS}}}t"))
+                elif tipo == "n" or not tipo:
+                    if raw is not None:
+                        try:
+                            raw = float(raw)
+                        except ValueError:
+                            pass
+                registro[col.group(0)] = raw
+            resultado.append(registro)
+        return resultado
+
+
+def preparar_importacion_excel(contenido: bytes) -> dict:
+    digest = hashlib.sha256(contenido).hexdigest()
+    batch_id = "XLSX-" + digest[:18].upper()
+    rows_r = leer_filas_xlsx(contenido, "Existencias")
+    rows_m = leer_filas_xlsx(contenido, "Movimientos")
+    rec, mov, pendientes = [], [], []
+    lookup = collections.defaultdict(list)
+    for r in rows_r:
+        if r["_fila"] < 10 or r["_fila"] > 439 or not clean_lote(r.get("B")):
+            continue
+        cantidad = i_num(r.get("G"))
+        fp, fi = date_excel(r.get("C"), mantener_hora=True), date_excel(r.get("F"))
+        tipo = plain(r.get("E")).upper()
+        if cantidad <= 0 or not parse_date(fp) or not parse_date(fi) or tipo not in TIPOS_HI:
+            pendientes.append(f"Existencias fila {r['_fila']}: datos mínimos inválidos; no se importa.")
+            continue
+        ident = "REC-" + str(uuid.uuid5(NAMESPACE, digest + ":R:" + str(r["_fila"]))).replace("-", "")[:20].upper()
+        codigo = plain(r.get("A"))
+        nuevo = dict(zip(RECEPCION, [
+            ident, clean_lote(r.get("B")), fp, i_num(r.get("D")), tipo,
+            fi, cantidad, plain(r.get("H")), plain(r.get("I")), plain(r.get("J")) or "Granja",
+            plain(r.get("K")), plain(r.get("L")), codigo, r["_fila"], timestamp(), batch_id,
+        ]))
+        rec.append(nuevo)
+        lookup[codigo].append(ident)
+    for m in rows_m:
+        if m["_fila"] < 10 or m["_fila"] > 1009 or not plain(m.get("B")):
+            continue
+        codigo = plain(m.get("B"))
+        if len(lookup[codigo]) != 1:
+            pendientes.append(f"Movimientos fila {m['_fila']}: ID histórico ambiguo/inexistente ({codigo}); no se importa.")
+            continue
+        tipo_map = {"Carga": "CARGA", "Transferencia": "TRANSFERENCIA", "Baja": "BAJA",
+                    "Ajuste +": "AJUSTE +", "Ajuste -": "AJUSTE -"}
+        tipo = tipo_map.get(plain(m.get("C")))
+        cant, fm = i_num(m.get("D")), date_excel(m.get("A"))
+        if not tipo or cant <= 0 or not parse_date(fm):
+            pendientes.append(f"Movimientos fila {m['_fila']}: fecha, tipo o cantidad inválidos; no se importa.")
+            continue
+        ref = "LEG-" + digest[:8].upper() + "-" + str(m["_fila"])
+        evt_id = "MOV-" + str(uuid.uuid5(NAMESPACE, digest + ":M:" + str(m["_fila"]))).replace("-", "")[:20].upper()
+        nuevo = dict(zip(MOVIMIENTO, [
+            evt_id, ref, fm, tipo, lookup[codigo][0], cant,
+            cant if tipo == "AJUSTE +" else -cant,
+            "", plain(m.get("Q")), plain(m.get("L")), plain(m.get("M")), plain(m.get("R")),
+            plain(m.get("N")), "", "", "", timestamp(), batch_id, m["_fila"],
+        ]))
+        mov.append(nuevo)
+    duplicados = {k: n for k, n in collections.Counter(r["codigo_excel"] for r in rec).items()
+                  if k and n > 1}
+    return {"recepciones": rec, "movimientos": mov, "pendientes": pendientes,
+            "duplicados": duplicados, "importacion_id": batch_id, "hash": digest}
+
+
+# ───────────────────────────── Google Sheets ─────────────────────────────
+def tiene_secrets() -> bool:
+    try:
+        return bool(st.secrets.get("gcp_service_account"))
+    except Exception:
+        return False
+
+
 @st.cache_resource(show_spinner=False)
-def conectar():
-    credenciales = Credentials.from_service_account_info(
+def libro_google():
+    if gspread is None or Credentials is None:
+        raise RuntimeError("Instale gspread y google-auth para usar Google Sheets.")
+    creds = Credentials.from_service_account_info(
         dict(st.secrets["gcp_service_account"]),
         scopes=["https://www.googleapis.com/auth/spreadsheets"],
     )
-    cliente = gspread.authorize(credenciales)
-    archivo = cliente.open_by_key(st.secrets.get("SPREADSHEET_ID", ID_PLANILLA_DEFAULT))
-    return archivo
+    key = st.secrets.get("SPREADSHEET_ID")
+    if not key:
+        raise ValueError("Falta SPREADSHEET_ID en secrets de Streamlit.")
+    return gspread.authorize(creds).open_by_key(key)
 
 
-def hoja(nombre: str):
-    return conectar().worksheet(nombre)
-
-
-def preparar_hojas():
-    libro = conectar()
-    existentes = {ws.title: ws for ws in libro.worksheets()}
-    for nombre, columnas in HOJAS.items():
+@st.cache_resource(show_spinner=False)
+def preparar_google():
+    libro = libro_google()
+    existentes = {s.title: s for s in libro.worksheets()}
+    for nombre, columnas in SHEETS.items():
         if nombre not in existentes:
-            try:
-                ws = libro.add_worksheet(title=nombre, rows=2000, cols=len(columnas))
-                ws.append_row(columnas, value_input_option="RAW")
-            except gspread.exceptions.APIError:
-                # Otro operador pudo haber creado la hoja al mismo tiempo.
-                ws = libro.worksheet(nombre)
-        else:
-            ws = existentes[nombre]
-        encabezado = ws.row_values(1)
-        if encabezado != columnas:
-            raise ValueError(
-                f"La hoja {nombre} tiene encabezados distintos a los esperados. "
-                "No se modifica automáticamente para proteger tus datos."
-            )
+            ws = libro.add_worksheet(nombre, rows=4000, cols=len(columnas))
+            ws.append_row(columnas, value_input_option="RAW")
+        elif existentes[nombre].row_values(1) != columnas:
+            raise ValueError(f"Encabezados incompatibles en {nombre}. No se modificarán automáticamente.")
 
 
-@st.cache_data(ttl=25, show_spinner=False)
-def cargar_tabla(nombre: str) -> pd.DataFrame:
-    df = pd.DataFrame(hoja(nombre).get_all_records(default_blank=""))
-    if nombre in HOJAS:
-        return df.reindex(columns=HOJAS[nombre]).fillna("")
-    return df.fillna("")
+@st.cache_data(ttl=20, show_spinner=False)
+def leer_google() -> dict:
+    archivo = libro_google()
+    return {
+        clase: archivo.worksheet(nombre).get_all_records(default_blank="")
+        for clase, nombre in MAP_SHEET.items()
+    }
 
 
-def append_registro(nombre: str, registro: dict):
-    hoja(nombre).append_row([registro.get(c, "") for c in HOJAS[nombre]], value_input_option="RAW")
-    cargar_tabla.clear()
+def cargar_registros(fresco=False) -> dict:
+    if tiene_secrets():
+        if fresco:
+            leer_google.clear()
+        return leer_google()
+    if "datos_demo" not in st.session_state:
+        st.session_state["datos_demo"] = {k: [] for k in MAP_SHEET}
+    return st.session_state["datos_demo"]
 
 
-def append_varios(nombre: str, registros: list[dict], tam_lote: int = 150):
-    for inicio in range(0, len(registros), tam_lote):
-        grupo = registros[inicio: inicio + tam_lote]
-        hoja(nombre).append_rows(
-            [[r.get(col, "") for col in HOJAS[nombre]] for r in grupo],
-            value_input_option="RAW",
-        )
-        cargar_tabla.clear()
-
-
-def tabla_fresca(nombre: str) -> pd.DataFrame:
-    # Durante la escritura NO usar el caché para validar cantidades y duplicados.
-    df = pd.DataFrame(hoja(nombre).get_all_records(default_blank=""))
-    return df.reindex(columns=HOJAS[nombre]).fillna("")
-
-
-def existe(df: pd.DataFrame, columna: str, valor: str) -> bool:
-    return not df.empty and df[columna].astype(str).eq(str(valor)).any()
-
-
-def registrar_evento(
-    id_evento: str, id_lote: str, id_raiz: str, tipo: str, cantidad: int,
-    variacion: int, planta: str, responsable: str, observaciones="",
-    planta_contraparte="", id_traslado="", referencia="", fecha_evento=None,
-    metadata=None,
-):
-    if existe(tabla_fresca("traz_eventos_v2"), "id_evento", id_evento):
-        return False
-    append_registro("traz_eventos_v2", {
-        "id_evento": id_evento, "id_lote": id_lote, "id_raiz": id_raiz,
-        "tipo": tipo, "cantidad": int(cantidad), "variacion": int(variacion),
-        "planta": planta, "planta_contraparte": planta_contraparte,
-        "id_traslado": id_traslado, "referencia": referencia,
-        "fecha_evento": fecha_evento or sello(), "responsable": responsable,
-        "observaciones": observaciones,
-        "metadata_json": json.dumps(metadata or {}, ensure_ascii=False, default=str),
-    })
-    return True
-
-
-# ─────────────────────────────── MODELO DE DATOS ─────────────────────────────
-def preparar_estado(lotes=None, eventos=None, traslados=None, recepciones=None):
-    l = cargar_tabla("traz_lotes_v2") if lotes is None else lotes.copy()
-    e = cargar_tabla("traz_eventos_v2") if eventos is None else eventos.copy()
-    t = cargar_tabla("traz_traslados_v2") if traslados is None else traslados.copy()
-    r = cargar_tabla("traz_recepciones_v2") if recepciones is None else recepciones.copy()
-
-    for col in ("cantidad", "variacion"):
-        e[col] = pd.to_numeric(e[col], errors="coerce").fillna(0).astype(int)
-    for col in ("cantidad_enviada",):
-        t[col] = pd.to_numeric(t[col], errors="coerce").fillna(0).astype(int)
-    for col in ("cantidad_aceptada", "cantidad_rechazada", "cantidad_faltante"):
-        r[col] = pd.to_numeric(r[col], errors="coerce").fillna(0).astype(int)
-    l["edad_repro"] = pd.to_numeric(l["edad_repro"], errors="coerce").fillna(0).astype(int)
-
-    saldo = e.groupby("id_lote", dropna=False)["variacion"].sum()
-    l["saldo"] = l["id_lote"].map(saldo).fillna(0).astype(int)
-    l["dias_postura"] = l["fecha_postura"].apply(dias_desde)
-    l["dias_planta"] = l["fecha_llegada"].apply(dias_desde)
-
-    if not t.empty:
-        totales = r.groupby("id_traslado")[["cantidad_aceptada", "cantidad_rechazada", "cantidad_faltante"]].sum()
-        for campo in totales.columns:
-            t[campo] = t["id_traslado"].map(totales[campo]).fillna(0).astype(int)
-        t["pendiente"] = (t["cantidad_enviada"] - t["cantidad_aceptada"] - t["cantidad_rechazada"] - t["cantidad_faltante"]).astype(int)
-        salidas = set(e.loc[e["tipo"] == "TRASLADO_ENVIO", "id_traslado"].astype(str))
-        t["estado"] = t.apply(
-            lambda x: "SIN DESPACHO" if str(x["id_traslado"]) not in salidas else
-            "ERROR: EXCESO" if x["pendiente"] < 0 else
-            "EN TRANSITO" if x["pendiente"] == x["cantidad_enviada"] else
-            "RECIBIDO CON DIFERENCIAS" if x["pendiente"] == 0 and (x["cantidad_rechazada"] + x["cantidad_faltante"]) > 0 else
-            "RECIBIDO" if x["pendiente"] == 0 else "RECEPCION PARCIAL",
-            axis=1,
-        )
+def guardar_filas(clase: str, filas: list[dict]):
+    if not filas:
+        return
+    if tiene_secrets():
+        ws = libro_google().worksheet(MAP_SHEET[clase])
+        columnas = SHEETS[MAP_SHEET[clase]]
+        # No escribir fórmulas importadas ni actualizar saldos directamente.
+        for ini in range(0, len(filas), 125):
+            ws.append_rows([[fila.get(c, "") for c in columnas] for fila in filas[ini:ini+125]],
+                           value_input_option="RAW")
+        leer_google.clear()
     else:
-        for campo in ("cantidad_aceptada", "cantidad_rechazada", "cantidad_faltante", "pendiente", "estado"):
-            t[campo] = pd.Series(dtype="object" if campo == "estado" else "int64")
-    return l, e, t, r
+        cargar_registros()[clase].extend(filas)
 
 
-def stock_fresco(id_lote: str) -> int:
-    e = tabla_fresca("traz_eventos_v2")
-    if e.empty:
-        return 0
-    ev = e[e["id_lote"].astype(str) == str(id_lote)]
-    return int(pd.to_numeric(ev["variacion"], errors="coerce").fillna(0).sum())
+def migrar_archivo(importacion: dict) -> dict:
+    actuales = cargar_registros(fresco=True)
+    res = {}
+    for clase in ("recepciones", "movimientos"):
+        campo = "id_recepcion" if clase == "recepciones" else "id_movimiento"
+        guardados = {plain(row.get(campo)) for row in actuales[clase]}
+        nuevos = [r for r in importacion[clase] if r[campo] not in guardados]
+        guardar_filas(clase, nuevos)
+        res[clase] = len(nuevos)
+    return res
 
 
-def resumen_traslado_fresco(id_traslado: str):
-    _, e, t, r = preparar_estado(
-        tabla_fresca("traz_lotes_v2"), tabla_fresca("traz_eventos_v2"),
-        tabla_fresca("traz_traslados_v2"), tabla_fresca("traz_recepciones_v2"),
-    )
-    x = t[t["id_traslado"].astype(str) == id_traslado]
-    if x.empty:
-        return None, e, r
-    return x.iloc[0], e, r
+def registrar_operacion(filas: list[dict], fecha: date):
+    actuales = cargar_registros(fresco=True)
+    validar_movimientos(filas, actuales, fecha)
+    guardar_filas("movimientos", filas)
 
 
-def validar_responsable(responsable: str) -> str:
-    responsable = responsable.strip()
-    if len(responsable) < 3:
-        raise ValueError("Escribe el nombre del responsable (mínimo 3 caracteres).")
-    return responsable
+def registrar_recepcion(fila: dict):
+    registros = cargar_registros(fresco=True)
+    duplicado = [r for r in registros["recepciones"] if
+                 clean_lote(r.get("lote")) == clean_lote(fila.get("lote")) and
+                 date_iso(r.get("fecha_postura")) == date_iso(fila.get("fecha_postura")) and
+                 plain(r.get("tipo_hi")) == plain(fila.get("tipo_hi")) and
+                 plain(r.get("guia_recepcion")).casefold() == plain(fila.get("guia_recepcion")).casefold()]
+    if duplicado:
+        raise ValueError("Ya existe una recepción del mismo lote, postura, clase y guía. Use un código de recepción distinto si corresponde a otra entrega.")
+    if any(plain(r.get("id_recepcion")) == fila["id_recepcion"] for r in registros["recepciones"]):
+        raise ValueError("Este ingreso ya fue registrado.")
+    guardar_filas("recepciones", [fila])
 
 
-def guardar_ingreso(datos: dict, responsable: str):
-    responsable = validar_responsable(responsable)
-    if not datos["lote_nro"].strip():
-        raise ValueError("El número del lote es obligatorio.")
-    if datos["cantidad"] <= 0:
-        raise ValueError("La cantidad debe ser mayor que cero.")
-    if datos["fecha_postura"] > datos["fecha_llegada"]:
-        raise ValueError("La fecha de postura no puede superar la fecha de llegada.")
-    if datos["fecha_llegada"] > ahora().date():
-        raise ValueError("La fecha de llegada no puede ser futura.")
+# ────────────────────────────── PRESENTACIÓN ──────────────────────────────
+STYLE = """
+<style>
+[data-testid="stAppViewContainer"]{background:#f6f8fb}
+.block-container{padding-top:1.05rem;padding-bottom:4rem;max-width:1570px}
+[data-testid="stSidebar"]{background:white;border-right:1px solid #e5eaf0}
+[data-testid="stSidebar"] .stRadio label{font-size:.88rem}
+[data-testid="stMetric"]{background:white;border:1px solid #e4eaf1;border-radius:15px;
+  padding:14px 17px 15px;box-shadow:0 3px 13px rgba(22,49,72,.035)}
+[data-testid="stMetricLabel"]{color:#697b8d;font-weight:600}
+[data-testid="stMetricValue"]{color:#193f5a;font-weight:750;letter-spacing:-.04em}
+div[data-testid="stVerticalBlockBorderWrapper"]>div{border-color:#e2e9f1;border-radius:14px}
+.stButton button{border-radius:10px;min-height:2.7rem;font-weight:600}
+.stButton button[kind="primary"],.stFormSubmitButton button[kind="primary"]{background:#df6b22;border:1px solid #df6b22;color:white}
+.stButton button[kind="primary"]:hover{background:#c85c17;border-color:#c85c17}
+.stTabs [data-baseweb="tab-list"]{gap:12px}
+.stTabs [data-baseweb="tab"]{border-radius:8px}
+h1,h2,h3{color:#1a3e59;letter-spacing:-.026em}
+h1{font-size:1.65rem !important}h2{font-size:1.24rem !important}
+.it-head{background:white;border:1px solid #e4eaf1;border-radius:16px;padding:20px 23px;
+ display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:17px;
+ border-top:4px solid #e47728}
+.it-kicker{font-size:.73rem;font-weight:800;letter-spacing:.095em;color:#cf6823;text-transform:uppercase}
+.it-title{font-size:1.58rem;line-height:1.22;font-weight:780;color:#173b55;letter-spacing:-.03em;margin:6px 0 5px}
+.it-sub{font-size:.88rem;color:#697b8b;line-height:1.45}
+.it-pill{background:#eaf4fb;color:#1e648b;border:1px solid #d6e8f3;
+ border-radius:8px;font-size:.77rem;padding:7px 10px;font-weight:700;white-space:nowrap}
+.it-brand{border-radius:13px;border:1px solid #e4eaf1;background:#f6f8fa;padding:13px 14px;margin-bottom:17px}
+.it-brand strong{font-size:1.12rem;color:#163c58;letter-spacing:-.035em}
+.it-brand span{display:block;color:#778a9b;font-size:.73rem;margin-top:3px}
+.it-note{color:#75869a;font-size:.8rem;line-height:1.5}
+.it-overline{font-size:.72rem;letter-spacing:.08em;font-weight:800;text-transform:uppercase;color:#6c8296}
+.it-rule{border-left:3px solid #e47728;padding:7px 11px;background:#fff;border-radius:0 8px 8px 0;
+ color:#576e81;font-size:.82rem}
+@media(max-width:760px){.it-head{display:block;padding:16px}.it-title{font-size:1.28rem}.it-pill{display:inline-block;margin-top:10px}}
+</style>
+"""
 
-    id_lote = datos["id_lote"]
-    lotes = tabla_fresca("traz_lotes_v2")
-    if not existe(lotes, "id_lote", id_lote):
-        append_registro("traz_lotes_v2", {
-            "id_lote": id_lote, "id_raiz": id_lote, "id_padre": "",
-            "lote_nro": datos["lote_nro"].strip().upper(),
-            "procedencia": datos["procedencia"], "planta": datos["planta"],
-            "granja": datos["granja"].strip(), "descripcion": datos["descripcion"],
-            "genetica": datos["genetica"], "edad_repro": datos["edad_repro"],
-            "fecha_postura": fecha_iso(datos["fecha_postura"]),
-            "fecha_llegada": fecha_iso(datos["fecha_llegada"]),
-            "cantidad_origen": datos["cantidad"],
-            "obs_sanitarias": datos["observaciones"], "origen_registro": "RECEPCION_EXTERNA",
-            "fecha_creacion": sello(), "creado_por": responsable,
-        })
-    else:
-        registrado = lotes[lotes["id_lote"].astype(str) == id_lote].iloc[0]
-        if entero(registrado["cantidad_origen"]) != datos["cantidad"] or str(registrado["planta"]) != datos["planta"]:
-            raise ValueError("Existe un borrador previo con diferente cantidad/planta. Verifica el registro antes de reintentar.")
-    registrar_evento(
-        "ING-" + id_lote, id_lote, id_lote, "RECEPCION_EXTERNA",
-        datos["cantidad"], datos["cantidad"], datos["planta"], responsable,
-        datos["observaciones"], referencia="RECEPCION EXTERNA",
-        fecha_evento=momento(datos["fecha_llegada"], datos["hora_llegada"]),
-    )
 
-
-def guardar_traslado(datos: dict, responsable: str):
-    responsable = validar_responsable(responsable)
-    if datos["planta_origen"] == datos["planta_destino"]:
-        raise ValueError("La planta de destino debe ser distinta de la de origen.")
-    if datos["cantidad_enviada"] <= 0:
-        raise ValueError("La cantidad debe ser mayor que cero.")
-    if datos["fecha_salida"] > ahora().date():
-        raise ValueError("La fecha de salida no puede ser futura.")
-    existente = tabla_fresca("traz_traslados_v2")
-    if not existe(existente, "id_traslado", datos["id_traslado"]):
-        l = tabla_fresca("traz_lotes_v2")
-        x = l[l["id_lote"].astype(str) == datos["id_lote_origen"]]
-        if x.empty:
-            raise ValueError("El lote no existe; actualiza los datos.")
-        x = x.iloc[0]
-        if x["planta"] != datos["planta_origen"]:
-            raise ValueError("La planta de origen no corresponde al lote.")
-        if datos["cantidad_enviada"] > stock_fresco(datos["id_lote_origen"]):
-            raise ValueError("Stock insuficiente. Otro movimiento pudo haber consumido el saldo.")
-        append_registro("traz_traslados_v2", {
-            "id_traslado": datos["id_traslado"], "id_lote_origen": datos["id_lote_origen"],
-            "id_lote_destino": datos["id_lote_destino"], "id_raiz": x["id_raiz"],
-            "lote_nro": x["lote_nro"], "planta_origen": datos["planta_origen"],
-            "planta_destino": datos["planta_destino"], "cantidad_enviada": datos["cantidad_enviada"],
-            "fecha_envio": momento(datos["fecha_salida"], datos["hora_salida"]),
-            "guia": datos["guia"], "transportista": datos["transportista"],
-            "placa": datos["placa"], "logtag": datos["logtag"],
-            "temperatura_salida": datos["temperatura_salida"],
-            "observaciones": datos["observaciones"], "responsable": responsable, "creado_en": sello(),
-        })
-    # Reintentos: escribir el despacho usando exactamente el documento persistido.
-    # Así no se descuentan cantidades diferentes por cambios en el formulario.
-    documento = tabla_fresca("traz_traslados_v2")
-    original = documento[documento["id_traslado"].astype(str) == datos["id_traslado"]].iloc[0]
-    if (str(original["id_lote_origen"]) != datos["id_lote_origen"] or
-            entero(original["cantidad_enviada"]) != datos["cantidad_enviada"] or
-            str(original["planta_destino"]) != datos["planta_destino"]):
-        raise ValueError("Este ID de traslado ya existe con otros datos. Revisar Auditoría.")
-    registrar_evento(
-        "ENV-" + datos["id_traslado"], str(original["id_lote_origen"]), str(original["id_raiz"]),
-        "TRASLADO_ENVIO", entero(original["cantidad_enviada"]), -entero(original["cantidad_enviada"]),
-        str(original["planta_origen"]), responsable, str(original["observaciones"]),
-        planta_contraparte=str(original["planta_destino"]), id_traslado=datos["id_traslado"],
-        referencia=str(original["guia"]), fecha_evento=str(original["fecha_envio"]),
+def render_header(title: str, sub: str, corte: date, identificacion: str = "P.I. Pucacaca"):
+    st.markdown(
+        f'<div class="it-head"><div><div class="it-kicker">Control de almacén / huevos incubables</div>'
+        f'<div class="it-title">{html.escape(title)}</div>'
+        f'<div class="it-sub">{html.escape(sub)}</div></div>'
+        f'<div class="it-pill">{html.escape(identificacion)} · Corte {corte:%d/%m/%Y}</div></div>',
+        unsafe_allow_html=True,
     )
 
 
-def guardar_recepcion_traslado(datos: dict, responsable: str):
-    responsable = validar_responsable(responsable)
-    tra, eventos, r = resumen_traslado_fresco(datos["id_traslado"])
-    if tra is None:
-        raise ValueError("No se encontró el traslado solicitado.")
-    # Reintentar una confirmación ya finalizada nunca debe descontar el pendiente.
-    if existe(r, "id_recepcion", datos["id_recepcion"]):
-        return False
-    if not existe(eventos[eventos["tipo"] == "TRASLADO_ENVIO"], "id_traslado", datos["id_traslado"]):
-        raise ValueError("Este envío carece de movimiento de despacho. Revisar Auditoría.")
-    if datos["fecha_recepcion"] > ahora().date():
-        raise ValueError("La recepción no puede registrarse con una fecha futura.")
-    if momento(datos["fecha_recepcion"], datos["hora_recepcion"]) < str(tra["fecha_envio"]):
-        raise ValueError("La fecha y hora de recepción no pueden preceder al despacho.")
-    if min(datos["aceptada"], datos["rechazada"], datos["faltante"]) < 0:
-        raise ValueError("Ninguna cantidad puede ser negativa.")
-    cantidad_total = datos["aceptada"] + datos["rechazada"] + datos["faltante"]
-    if cantidad_total <= 0:
-        raise ValueError("Debes registrar al menos un huevo recibido, rechazado o faltante.")
-    if cantidad_total > entero(tra["pendiente"]):
-        raise ValueError("La suma supera la cantidad pendiente de recepción.")
-    if datos["rechazada"] + datos["faltante"] > 0 and not datos["observaciones"].strip():
-        raise ValueError("Las diferencias deben tener una explicación en observaciones.")
-    # Bloquear nuevas recepciones si hay un evento anterior sin confirmación.
-    confirmadas = set(r["id_recepcion"].astype(str))
-    pendientes_de_recuperar = eventos[
-        (eventos["tipo"] == "RECEPCION_TRASLADO") &
-        (eventos["id_traslado"].astype(str) == datos["id_traslado"]) &
-        (~eventos["referencia"].astype(str).isin(confirmadas))
-    ]
-    no_reparados = pendientes_de_recuperar[
-        pendientes_de_recuperar["referencia"].astype(str) != datos["id_recepcion"]
-    ]
-    if not no_reparados.empty:
-        raise ValueError("Hay una recepción incompleta de este traslado. Repara esa operación antes de registrar otra.")
-    if not pendientes_de_recuperar.empty:
-        anterior = pendientes_de_recuperar.iloc[0]
-        if entero(anterior["cantidad"]) != datos["aceptada"]:
-            raise ValueError("Este borrador fue grabado parcialmente con otra cantidad aceptada. Conserva los datos originales.")
-
-    if datos["aceptada"] > 0:
-        lotes = tabla_fresca("traz_lotes_v2")
-        if not existe(lotes, "id_lote", tra["id_lote_destino"]):
-            padres = lotes[lotes["id_lote"].astype(str) == str(tra["id_lote_origen"])]
-            if padres.empty:
-                raise ValueError("Falta el lote de origen; no se puede reconstruir la trazabilidad.")
-            p = padres.iloc[0]
-            append_registro("traz_lotes_v2", {
-                "id_lote": tra["id_lote_destino"], "id_raiz": tra["id_raiz"],
-                "id_padre": tra["id_lote_origen"], "lote_nro": p["lote_nro"],
-                "procedencia": p["procedencia"], "planta": tra["planta_destino"],
-                "granja": p["granja"], "descripcion": p["descripcion"],
-                "genetica": p["genetica"], "edad_repro": p["edad_repro"],
-                "fecha_postura": p["fecha_postura"], "fecha_llegada": fecha_iso(datos["fecha_recepcion"]),
-                "cantidad_origen": 0,
-                "obs_sanitarias": p["obs_sanitarias"], "origen_registro": "RECEPCION_TRASLADO",
-                "fecha_creacion": sello(), "creado_por": responsable,
-            })
-    # Se guarda evento ANTES de la confirmación. Si falla Sheets, se puede
-    # reintentar el mismo borrador sin duplicar el evento.
-    registrar_evento(
-        "RET-" + datos["id_recepcion"], tra["id_lote_destino"], tra["id_raiz"],
-        "RECEPCION_TRASLADO", datos["aceptada"], datos["aceptada"],
-        tra["planta_destino"], responsable, datos["observaciones"],
-        planta_contraparte=tra["planta_origen"], id_traslado=datos["id_traslado"],
-        referencia=datos["id_recepcion"],
-        fecha_evento=momento(datos["fecha_recepcion"], datos["hora_recepcion"]),
-        metadata={"fecha_recepcion": fecha_iso(datos["fecha_recepcion"]),
-                  "hora_recepcion": str(datos["hora_recepcion"]),
-                  "aceptada": datos["aceptada"], "rechazada": datos["rechazada"],
-                  "faltante": datos["faltante"], "temperatura_llegada": datos["temperatura_llegada"],
-                  "condicion": datos["condicion"], "observaciones": datos["observaciones"]},
-    )
-    append_registro("traz_recepciones_v2", {
-        "id_recepcion": datos["id_recepcion"], "id_traslado": datos["id_traslado"],
-        "id_lote_destino": tra["id_lote_destino"],
-        "fecha_recepcion": momento(datos["fecha_recepcion"], datos["hora_recepcion"]),
-        "cantidad_aceptada": datos["aceptada"],
-        "cantidad_rechazada": datos["rechazada"], "cantidad_faltante": datos["faltante"],
-        "temperatura_llegada": datos["temperatura_llegada"], "condicion": datos["condicion"],
-        "observaciones": datos["observaciones"], "responsable": responsable, "creado_en": sello(),
-    })
-    return True
+def flash(mensaje: str):
+    st.session_state["flash"] = mensaje
+    if tiene_secrets():
+        leer_google.clear()
+    st.rerun()
 
 
-def guardar_salida(datos: dict, responsable: str):
-    responsable = validar_responsable(responsable)
-    if datos["cantidad"] <= 0:
-        raise ValueError("La cantidad debe ser mayor que cero.")
-    if datos["tipo"] == "SALIDA_INCUBADORA" and not datos["referencia"].strip():
-        raise ValueError("Indica la incubadora o la carga correspondiente.")
-    if datos["tipo"] in {"MERMA", "AJUSTE_POSITIVO", "AJUSTE_NEGATIVO"} and not datos["observaciones"].strip():
-        raise ValueError("Es obligatorio justificar mermas y ajustes.")
-    ev = tabla_fresca("traz_eventos_v2")
-    if existe(ev, "id_evento", datos["id_evento"]):
-        return False
-    lotes = tabla_fresca("traz_lotes_v2")
-    x = lotes[lotes["id_lote"].astype(str) == datos["id_lote"]]
-    if x.empty:
-        raise ValueError("El lote no existe.")
-    x = x.iloc[0]
-    signo = 1 if datos["tipo"] == "AJUSTE_POSITIVO" else -1
-    if signo == -1 and stock_fresco(datos["id_lote"]) < datos["cantidad"]:
-        raise ValueError("Cantidad superior al saldo disponible.")
-    return registrar_evento(
-        datos["id_evento"], datos["id_lote"], x["id_raiz"], datos["tipo"],
-        datos["cantidad"], signo * datos["cantidad"], x["planta"], responsable,
-        datos["observaciones"], referencia=datos["referencia"],
-    )
+def csv_bytes(filas: list[dict]) -> bytes:
+    return pd.DataFrame(filas).to_csv(index=False).encode("utf-8-sig")
 
 
-def diagnosticos(lotes: pd.DataFrame, eventos: pd.DataFrame, traslados: pd.DataFrame, recepciones: pd.DataFrame) -> pd.DataFrame:
-    problemas = []
-
-    def agregar(tipo, referencia, detalle):
-        problemas.append({"Control": tipo, "Referencia": referencia, "Detalle": detalle})
-
-    for _, x in lotes[lotes["saldo"] < 0].iterrows():
-        agregar("SALDO NEGATIVO", x["id_lote"], f"Saldo: {x['saldo']}")
-    for nombre, df, clave in [
-        ("lotes", lotes, "id_lote"), ("eventos", eventos, "id_evento"),
-        ("traslados", traslados, "id_traslado"), ("recepciones", recepciones, "id_recepcion"),
-    ]:
-        for value in df.loc[df[clave].astype(str).duplicated(keep=False), clave].astype(str).unique():
-            agregar("ID DUPLICADO", value, f"Duplicado en {nombre}")
-    ids_lote = set(lotes["id_lote"].astype(str))
-    ids_tra = set(traslados["id_traslado"].astype(str))
-    for _, x in eventos.iterrows():
-        if str(x["id_lote"]) not in ids_lote and (x["tipo"] != "RECEPCION_TRASLADO" or entero(x["cantidad"]) > 0):
-            agregar("EVENTO SIN LOTE", x["id_evento"], x["id_lote"])
-        if x["tipo"] in ("TRASLADO_ENVIO", "RECEPCION_TRASLADO") and str(x["id_traslado"]) not in ids_tra:
-            agregar("EVENTO SIN TRASLADO", x["id_evento"], x["id_traslado"])
-    for _, x in traslados.iterrows():
-        if x["estado"] == "SIN DESPACHO":
-            agregar("ENVIO INCOMPLETO", x["id_traslado"], "Existe documento sin evento de salida")
-        if x["pendiente"] < 0:
-            agregar("RECEPCION EXCEDIDA", x["id_traslado"], "Se recibió más de lo enviado")
-        eventos_env = eventos[(eventos["tipo"] == "TRASLADO_ENVIO") & (eventos["id_traslado"].astype(str) == str(x["id_traslado"]))]
-        if not eventos_env.empty and int(eventos_env["cantidad"].sum()) != int(x["cantidad_enviada"]):
-            agregar("DESPACHO INCONSISTENTE", x["id_traslado"], "El documento difiere del movimiento")
-    eventos_por_id = eventos.set_index("id_evento") if not eventos.empty else pd.DataFrame()
-    for _, x in recepciones.iterrows():
-        llave = "RET-" + str(x["id_recepcion"])
-        if llave not in set(eventos["id_evento"].astype(str)):
-            agregar("RECEPCION SIN EVENTO", x["id_recepcion"], "No consta movimiento de entrada")
-        elif entero(eventos_por_id.loc[llave, "cantidad"]) != entero(x["cantidad_aceptada"]):
-            agregar("CANTIDAD DE RECEPCION INCONSISTENTE", x["id_recepcion"], "Evento y confirmación difieren")
-    ids_eventos = set(eventos["id_evento"].astype(str))
-    for _, x in lotes.iterrows():
-        origen = str(x["origen_registro"])
-        llave = ("ING-" if origen == "RECEPCION_EXTERNA" else "LEG-") + str(x["id_lote"])
-        if origen in {"RECEPCION_EXTERNA", "IMPORTADO_LEGACY"} and entero(x["cantidad_origen"]) > 0 and llave not in ids_eventos:
-            agregar("LOTE SIN SALDO INICIAL", x["id_lote"], "Falta el evento de apertura/ingreso")
-    recep_ids = set(recepciones["id_recepcion"].astype(str))
-    for _, x in eventos[eventos["tipo"] == "RECEPCION_TRASLADO"].iterrows():
-        referencia = str(x["referencia"])
-        if referencia not in recep_ids:
-            agregar("EVENTO SIN CONFIRMACION", x["id_evento"], "Recepción pendiente de completar")
-    return pd.DataFrame(problemas, columns=["Control", "Referencia", "Detalle"])
-
-
-def migrar_desde_legacy(responsable: str):
-    responsable = validar_responsable(responsable)
-    origen = pd.DataFrame(hoja("lotes").get_all_records(default_blank=""))
-    requeridas = {"id_unico", "lote_nro", "planta", "saldo", "fecha_postura", "fecha_llegada"}
-    if not requeridas.issubset(origen.columns):
-        raise ValueError(f"Faltan columnas en hoja histórica 'lotes': {sorted(requeridas-set(origen.columns))}")
-    ids_antiguos = origen["id_unico"].astype(str).str.strip()
-    if ids_antiguos[ids_antiguos.ne("")].duplicated().any():
-        raise ValueError("Hay IDs duplicados en la hoja antigua. Corrígelos antes de migrar.")
-    saldos = pd.to_numeric(origen["saldo"], errors="coerce")
-    if saldos.isna().any() or (saldos < 0).any() or ((saldos % 1) != 0).any():
-        raise ValueError("Hay saldos negativos o no numéricos en el histórico. Corregir antes de migrar.")
-
-    lotes_v2 = tabla_fresca("traz_lotes_v2")
-    eventos_v2 = tabla_fresca("traz_eventos_v2")
-    existentes_lotes = set(lotes_v2["id_lote"].astype(str))
-    existentes_eventos = set(eventos_v2["id_evento"].astype(str))
-    otros_ids = set(lotes_v2.loc[lotes_v2["origen_registro"].astype(str) != "IMPORTADO_LEGACY", "id_lote"].astype(str))
-    colision = set(ids_antiguos) & otros_ids
-    if colision:
-        raise ValueError(f"Hay IDs antiguos que coinciden con registros nuevos: {list(colision)[:4]}. Detenida la importación.")
-
-    ahora_migracion = sello()
-    nuevos_lotes, nuevos_eventos = [], []
-    for _, x in origen.iterrows():
-        id_lote = str(x["id_unico"]).strip()
-        if not id_lote:
-            continue
-        saldo = entero(x.get("saldo", 0))
-        if id_lote not in existentes_lotes:
-            nuevos_lotes.append({
-                "id_lote": id_lote, "id_raiz": id_lote, "id_padre": "",
-                "lote_nro": x.get("lote_nro", ""), "procedencia": x.get("procedencia", ""),
-                "planta": x.get("planta", ""), "granja": x.get("granja", ""),
-                "descripcion": x.get("descripcion", ""), "genetica": x.get("linea_genetica", ""),
-                "edad_repro": entero(x.get("edad_repro", 0)), "fecha_postura": x.get("fecha_postura", ""),
-                "fecha_llegada": x.get("fecha_llegada", ""), "cantidad_origen": saldo,
-                "obs_sanitarias": x.get("obs_sanitarias", ""),
-                "origen_registro": "IMPORTADO_LEGACY", "fecha_creacion": ahora_migracion,
-                "creado_por": responsable,
-            })
-        if saldo > 0 and ("LEG-" + id_lote) not in existentes_eventos:
-            nuevos_eventos.append({
-                "id_evento": "LEG-" + id_lote, "id_lote": id_lote, "id_raiz": id_lote,
-                "tipo": "APERTURA_LEGACY", "cantidad": saldo, "variacion": saldo,
-                "planta": x.get("planta", ""), "planta_contraparte": "", "id_traslado": "",
-                "referencia": "SNAPSHOT DE MIGRACION", "fecha_evento": ahora_migracion,
-                "responsable": responsable,
-                "observaciones": "Saldo inicial importado. Los movimientos anteriores no recalculan este saldo.",
-                "metadata_json": "{}",
-            })
-    # Primero las fichas maestras; después, los saldos iniciales. Si una operación
-    # falla, al repetir se omiten IDs ya persistidos para evitar duplicaciones.
-    append_varios("traz_lotes_v2", nuevos_lotes)
-    append_varios("traz_eventos_v2", nuevos_eventos)
-    return len(nuevos_lotes), len(nuevos_eventos)
-
-
-def reparar_despacho_desde_documento(traslado: pd.Series, responsable: str):
-    responsable = validar_responsable(responsable)
-    if existe(tabla_fresca("traz_eventos_v2"), "id_evento", "ENV-" + str(traslado["id_traslado"])):
-        return False
-    cantidad = entero(traslado["cantidad_enviada"])
-    if stock_fresco(str(traslado["id_lote_origen"])) < cantidad:
-        raise ValueError("Saldo insuficiente para conciliar el despacho. Requiere revisión manual de eventos posteriores.")
-    return registrar_evento(
-        "ENV-" + str(traslado["id_traslado"]), str(traslado["id_lote_origen"]),
-        str(traslado["id_raiz"]), "TRASLADO_ENVIO", cantidad, -cantidad,
-        str(traslado["planta_origen"]), responsable,
-        str(traslado["observaciones"]),
-        planta_contraparte=str(traslado["planta_destino"]),
-        id_traslado=str(traslado["id_traslado"]),
-        referencia=str(traslado["guia"]), fecha_evento=str(traslado["fecha_envio"]),
-    )
-
-
-def reparar_recepcion_desde_evento(evento: pd.Series):
-    """Completa la confirmación si se guardó el evento, pero no la recepción."""
-    if str(evento["tipo"]) != "RECEPCION_TRASLADO":
-        raise ValueError("El evento seleccionado no es una recepción.")
-    info = json.loads(str(evento["metadata_json"] or "{}"))
-    obligatorios = {"fecha_recepcion", "hora_recepcion", "aceptada", "rechazada", "faltante", "condicion"}
-    if not obligatorios.issubset(info):
-        raise ValueError("No hay datos suficientes para la reparación automática.")
-    id_recep = str(evento["referencia"])
-    if existe(tabla_fresca("traz_recepciones_v2"), "id_recepcion", id_recep):
-        return False
-    traslado = tabla_fresca("traz_traslados_v2")
-    x = traslado[traslado["id_traslado"].astype(str) == str(evento["id_traslado"])]
-    if x.empty:
-        raise ValueError("No existe el documento de traslado asociado.")
-    x = x.iloc[0]
-    # El evento ya existe, de modo que NO debe crearse un segundo movimiento.
-    if entero(evento["cantidad"]) != entero(info["aceptada"]):
-        raise ValueError("La cantidad del evento difiere del respaldo de recepción.")
-    append_registro("traz_recepciones_v2", {
-        "id_recepcion": id_recep, "id_traslado": evento["id_traslado"],
-        "id_lote_destino": x["id_lote_destino"],
-        "fecha_recepcion": momento(date.fromisoformat(info["fecha_recepcion"]), dt_time.fromisoformat(info["hora_recepcion"])),
-        "cantidad_aceptada": entero(info["aceptada"]),
-        "cantidad_rechazada": entero(info["rechazada"]),
-        "cantidad_faltante": entero(info["faltante"]),
-        "temperatura_llegada": info.get("temperatura_llegada", ""),
-        "condicion": info["condicion"], "observaciones": info.get("observaciones", ""),
-        "responsable": evento["responsable"], "creado_en": sello(),
-    })
-    return True
-
-
-# ────────────────────────────────── INTERFAZ ──────────────────────────────────
-def titulo(nombre, descripcion):
-    st.title(nombre)
-    st.markdown(f'<div class="section-intro">{seguro(descripcion)}</div>', unsafe_allow_html=True)
-
-
-def tabla(df: pd.DataFrame, altura=400):
-    st.dataframe(df, use_container_width=True, hide_index=True, height=altura)
-
-
-def etiqueta_lote(row):
-    return f"{row['lote_nro']} · {row['planta']} · {row['id_lote']} · {entero(row['saldo']):,} huevos"
-
-
-def elegir_lote(df, key, etiqueta="Seleccionar recepción/lote"):
+def tabla(filas: list[dict] | pd.DataFrame, height=360):
+    df = filas if isinstance(filas, pd.DataFrame) else pd.DataFrame(filas)
     if df.empty:
-        st.info("No hay lotes disponibles.")
-        return None
-    opciones = df.set_index("id_lote").to_dict("index")
-    resultado = st.selectbox(etiqueta, list(opciones), format_func=lambda k: etiqueta_lote({**opciones[k], "id_lote": k}), key=key)
-    return df[df["id_lote"] == resultado].iloc[0]
+        st.info("No hay registros para los filtros seleccionados.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True, height=min(height, 45 + len(df)*35))
 
 
-with st.sidebar:
-    st.markdown('<div class="kicker">Control de Gestión</div>', unsafe_allow_html=True)
-    st.markdown("### IncubaTrack 2.0")
-    st.caption("Trazabilidad de huevo incubable")
-    menu = st.radio(
-        "Módulos", [
-            "Resumen", "Recepciones", "Traslados entre plantas", "Salidas y ajustes",
-            "Inventario", "Trazabilidad", "Auditoría y configuración",
-        ], label_visibility="collapsed",
+def tabla_operativa(inv: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(inv)
+    if df.empty:
+        return df
+    campos = {
+        "lote": "Lote", "fecha_postura": "Postura", "tipo_hi": "Clase",
+        "edad_repro": "Edad (sem.)", "guia_recepcion": "Guía", "ubicacion": "Ubicación",
+        "ingresos_hi": "Ingresos HI", "saldo_hi": "Saldo HI", "cajas": "Cajas",
+        "adicionales": "Adicionales", "dias_postura": "Días desde postura",
+        "dias_restantes": "Días restantes", "estado": "Prioridad",
+    }
+    return df[list(campos)].rename(columns=campos)
+
+
+def opciones(inv: list[dict]) -> list[dict]:
+    return sorted((r for r in inv if r["saldo_hi"] > 0),
+                  key=lambda r: (r["dias_restantes"] if r["dias_restantes"] is not None else 9999,
+                                 r["fecha_postura"], r["lote"]))
+
+
+def etiqueta(r: dict) -> str:
+    return f"{r['lote']} · {etiqueta_postura(r['fecha_postura'])} · {r['tipo_hi']} · {num_format(r['saldo_hi'])} HI · {r['ubicacion']}"
+
+
+def selector_cantidades(inv: list[dict], clave: str) -> list[dict]:
+    elegibles = opciones(inv)
+    if not elegibles:
+        st.warning("No existen recepciones con saldo disponible al corte seleccionado.")
+        return []
+    buscar_lote = st.text_input("Filtrar por lote o guía", key=f"{clave}_buscar", placeholder="Ej.: 228, SF C016, RECP...")
+    clase = st.selectbox("Clase de huevo", ["Todas", "OK", "R", "RR"], key=f"{clave}_clase")
+    if buscar_lote:
+        elegibles = [r for r in elegibles if buscar_lote.casefold() in
+                     (r["lote"] + " " + r["guia_recepcion"] + " " + r["ubicacion"]).casefold()]
+    if clase != "Todas":
+        elegibles = [r for r in elegibles if r["tipo_hi"] == clase]
+    by_id = {r["id_recepcion"]: r for r in elegibles}
+    seleccion = st.multiselect("Seleccionar recepciones (puede combinar varias)", list(by_id),
+                               format_func=lambda rid: etiqueta(by_id[rid]), key=f"{clave}_sel")
+    if not seleccion:
+        return []
+    entradas = [{"id_recepcion": rid, "Lote": by_id[rid]["lote"],
+                 "Postura": by_id[rid]["fecha_postura"], "Clase": by_id[rid]["tipo_hi"],
+                 "Disponible": by_id[rid]["saldo_hi"], "Cantidad HI": 0} for rid in seleccion]
+    ed = st.data_editor(
+        pd.DataFrame(entradas), hide_index=True, use_container_width=True,
+        disabled=["id_recepcion", "Lote", "Postura", "Clase", "Disponible"],
+        column_config={"Cantidad HI": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+                       "id_recepcion": None}, key=f"{clave}_ed", num_rows="fixed",
     )
-    st.divider()
-    responsable = st.text_input("Responsable que registra", value=st.session_state.get("operador", ""), placeholder="Nombre y apellido")
-    st.session_state["operador"] = responsable
-    edad_alerta = st.number_input("Alertar edad del huevo superior a (días)", min_value=1, max_value=60, value=10)
-    if st.button("Actualizar datos", use_container_width=True):
-        cargar_tabla.clear()
-        st.rerun()
-    st.caption("Los usuarios ingresados aquí no están autenticados. Implementar login antes del uso generalizado.")
+    items = [{"id_recepcion": r["id_recepcion"], "cantidad_hi": i_num(r["Cantidad HI"])} for r in ed.to_dict("records")]
+    suma = sum(r["cantidad_hi"] for r in items)
+    st.caption(f"Total seleccionado: {num_format(suma)} HI = {num_format(suma//HI_POR_CAJA)} cajas + {suma%HI_POR_CAJA} HI. Las cantidades en cero no se procesan.")
+    for it in items:
+        if it["cantidad_hi"] > by_id[it["id_recepcion"]]["saldo_hi"]:
+            st.error(f"La cantidad supera el saldo del lote {by_id[it['id_recepcion']]['lote']}.")
+    return [x for x in items if x["cantidad_hi"] > 0]
 
-try:
-    preparar_hojas()
-    lotes, eventos, traslados, recepciones = preparar_estado()
-except Exception as error:
-    st.error(f"No fue posible inicializar Google Sheets: {error}")
-    st.info("Revisa los permisos de la cuenta de servicio y el archivo indicado en Streamlit Secrets.")
-    st.stop()
 
-if st.session_state.get("mensaje_exito"):
-    st.toast(st.session_state.pop("mensaje_exito"), icon="✅")
+def construir_movimientos(tipo: str, items: list[dict], fecha: date, documento: str,
+                           responsable: str, observacion="", incubadora="", destino="",
+                           causa="", transportista="", placa="", logtag="", operacion=None) -> list[dict]:
+    op = operacion or new_id("OP")
+    salida = []
+    for index, it in enumerate(items, 1):
+        cant = it["cantidad_hi"]
+        salida.append(dict(zip(MOVIMIENTO, [
+            f"{op}-{index:03d}", op, fecha.isoformat(), tipo, it["id_recepcion"], cant,
+            cant if tipo == "AJUSTE +" else -cant, incubadora, destino,
+            documento.strip(), responsable.strip(), causa.strip(), observacion.strip(),
+            transportista.strip(), placa.strip(), logtag.strip(), timestamp(), "", "",
+        ])))
+    return salida
 
-if menu == "Resumen":
-    titulo("Centro de control", "Visión consolidada por planta, stock disponible y traslados pendientes de recepción.")
-    total = int(lotes["saldo"].sum())
-    transito = int(traslados.loc[traslados["estado"].isin(["EN TRANSITO", "RECEPCION PARCIAL"]), "pendiente"].sum())
-    pendientes = int(traslados["estado"].isin(["EN TRANSITO", "RECEPCION PARCIAL"]).sum())
-    difer = int(traslados["cantidad_rechazada"].sum() + traslados["cantidad_faltante"].sum())
-    vencidos = int(((lotes["saldo"] > 0) & (pd.to_numeric(lotes["dias_postura"], errors="coerce") > edad_alerta)).sum())
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Stock en plantas", f"{total:,}")
-    m2.metric("Huevos en tránsito", f"{transito:,}")
-    m3.metric("Traslados abiertos", f"{pendientes:,}")
-    m4.metric("Rechazos + faltantes", f"{difer:,}")
-    m5.metric("Recepciones en alerta", f"{vencidos:,}")
-    st.caption("El tránsito no forma parte del stock físico disponible. Las diferencias se contabilizan solo cuando se registran en la recepción.")
 
-    st.subheader("Existencias por planta")
-    resumen = pd.DataFrame({"Planta": PLANTAS})
-    agrup = lotes.groupby("planta")["saldo"].sum()
-    resumen["Huevos disponibles"] = resumen["Planta"].map(agrup).fillna(0).astype(int)
-    resumen["Recepciones activas"] = resumen["Planta"].map(lotes[lotes["saldo"] > 0].groupby("planta").size()).fillna(0).astype(int)
-    c1, c2 = st.columns([2, 1])
+def presentar_dashboard(registros, inv, corte, reglas):
+    render_header("Centro de control", "Saldo disponible, prioridades de carga y movimientos del almacén de HI.", corte)
+    k = estadisticas(inv, registros["movimientos"], corte)
+    a,b,c,d = st.columns(4)
+    a.metric("Saldo en almacén", f"{num_format(k['saldo'])} HI")
+    b.metric("Cajas completas", num_format(k["cajas"]), f"+ {k['adicionales']} HI")
+    c.metric("HI a priorizar", num_format(k["prioridad"]))
+    d.metric("Recepciones con saldo", num_format(k["grupos"]))
+    a,b,c,d = st.columns(4)
+    a.metric("Ingresos acumulados", num_format(k["ingresos"]))
+    b.metric("Cargados a incubación", num_format(k["cargados"]))
+    c.metric("Transferidos a Tarapoto", num_format(k["transferidos"]))
+    d.metric("Antigüedad ponderada", f"{k['promedio_dias']} días")
+    st.caption("Los movimientos se descuentan una sola vez del almacén. Los días se cuentan desde la postura (no solo desde la llegada).")
+    c1,c2 = st.columns([1.3,1])
     with c1:
-        st.bar_chart(resumen.set_index("Planta")[["Huevos disponibles"]], horizontal=True)
+        with st.container(border=True):
+            st.subheader("Existencias por lote reproductora")
+            df = pd.DataFrame(inv)
+            if not df.empty:
+                df = df.groupby("lote", as_index=False)["saldo_hi"].sum().sort_values("saldo_hi", ascending=False).head(15)
+                st.bar_chart(df.set_index("lote"), y="saldo_hi", color="#1d6b96", height=310)
+            else:
+                st.info("Sin información de existencias.")
     with c2:
-        tabla(resumen, 205)
+        with st.container(border=True):
+            st.subheader("Composición actual")
+            df = pd.DataFrame(inv)
+            if not df.empty:
+                series = df.groupby("tipo_hi")["saldo_hi"].sum().reindex(["OK", "R", "RR"], fill_value=0)
+                st.bar_chart(series, color="#e3782b", height=310)
+                st.caption("OK: incubable · R: recuperado almacén · RR: recuperado granja")
+            else:
+                st.info("Sin información.")
+    with st.container(border=True):
+        st.subheader("Prioridad de carga")
+        st.markdown('<div class="it-rule">Los objetivos por edad son <b>provisionales</b>, tomados del Excel. Deben ser aprobados por el área técnica antes de utilizarlos como criterio operativo.</div>', unsafe_allow_html=True)
+        foco = [r for r in opciones(inv) if r["estado"] in ("Objetivo superado", "Cargar hoy", "Próximo objetivo")]
+        tabla(tabla_operativa(foco).head(30) if foco else [], height=315)
+        st.caption(f"Reglas de ejemplo: <50 semanas {reglas[0]} días; 50–59 semanas {reglas[1]} días; ≥60 semanas {reglas[2]} días.")
+    inc = incidencias(registros, inv)
+    if inc:
+        with st.expander(f"Controles documentales pendientes ({len(inc)})"):
+            tabla(inc, 300)
 
-    st.subheader("Seguimiento de transferencias")
-    if traslados.empty:
-        st.info("Sin traslados registrados todavía.")
-    else:
-        vista = traslados.sort_values("fecha_envio", ascending=False).head(12)
-        tabla(vista[["id_traslado", "lote_nro", "planta_origen", "planta_destino", "cantidad_enviada", "cantidad_aceptada", "pendiente", "estado"]], 360)
 
-    if vencidos:
-        with st.expander(f"Ver {vencidos} recepciones con huevos de más de {edad_alerta} días desde postura"):
-            alerta = lotes[(lotes["saldo"] > 0) & (pd.to_numeric(lotes["dias_postura"], errors="coerce") > edad_alerta)]
-            tabla(alerta[["lote_nro", "id_lote", "planta", "saldo", "dias_postura", "dias_planta"]])
+def presentar_recepciones(registros, inv, corte):
+    render_header("Recepciones de HI", "Cada recepción conserva su guía, postura, tipo de huevo y ubicación.", corte)
+    t1,t2 = st.tabs(["Registrar ingreso", "Ingresos registrados"])
+    with t1:
+        with st.container(border=True):
+            st.subheader("Nueva recepción a almacén")
+            with st.form("new_reception", clear_on_submit=True):
+                a,b,c = st.columns(3)
+                lote = a.text_input("Lote reproductora *", placeholder="Ej.: 237 / SF C016")
+                tipo = b.selectbox("Clase HI *", TIPOS_HI)
+                edad = c.number_input("Edad reproductora a postura (semanas) *", min_value=1, max_value=100, value=45)
+                a,b,c = st.columns(3)
+                postura = a.date_input("Fecha de postura *", max_value=date.today())
+                ingreso = b.date_input("Fecha de ingreso *", max_value=date.today())
+                cantidad = c.number_input("Cantidad de HI *", min_value=1, step=1)
+                a,b,c = st.columns(3)
+                ubicacion = a.text_input("Almacén / posición *", placeholder="Ej.: REFFER 2")
+                guia = b.text_input("Guía / código de recepción *", placeholder="Ej.: RECP-02-05-11")
+                origen = c.selectbox("Origen *", ORIGENES)
+                responsable = st.text_input("Responsable *", value=st.session_state.get("operador", ""))
+                observ = st.text_area("Observaciones / condición", height=85)
+                aceptar = st.checkbox("Confirmo que la información coincide con la recepción física")
+                guardar = st.form_submit_button("Registrar recepción", type="primary", use_container_width=True)
+            if guardar:
+                try:
+                    if not all((lote.strip(), guia.strip(), ubicacion.strip(), responsable.strip())):
+                        raise ValueError("Complete lote, guía, ubicación y responsable.")
+                    if ingreso < postura:
+                        raise ValueError("La fecha de ingreso no puede ser anterior a la postura.")
+                    if not aceptar:
+                        raise ValueError("Confirme la verificación de la recepción antes de guardarla.")
+                    fila = dict(zip(RECEPCION, [new_id("REC"), clean_lote(lote),
+                         postura.isoformat(), int(edad), tipo, ingreso.isoformat(), int(cantidad),
+                         ubicacion.strip(), guia.strip(), origen, responsable.strip(), observ.strip(),
+                         "", "", timestamp(), ""]))
+                    registrar_recepcion(fila)
+                    flash("Recepción de HI guardada correctamente.")
+                except Exception as exc:
+                    st.error(str(exc))
+    with t2:
+        registros_ = registros["recepciones"]
+        tabla([{"Fecha ingreso": x.get("fecha_ingreso", ""), "Lote": clean_lote(x.get("lote")),
+                "Postura": x.get("fecha_postura", ""), "Clase": x.get("tipo_hi", ""),
+                "Cantidad HI": i_num(x.get("cantidad_hi")), "Ubicación": x.get("ubicacion", ""),
+                "Guía": x.get("guia_recepcion", ""), "Responsable": x.get("responsable", ""),
+                "ID": x.get("id_recepcion", "")} for x in registros_], 470)
+        st.download_button("Exportar ingresos (CSV)", csv_bytes(registros_), file_name="HI_Pucacaca_Ingresos.csv", mime="text/csv")
 
-elif menu == "Recepciones":
-    titulo("Recepción de huevos", "Registra huevos externos que llegan a una planta. Las transferencias internas se reciben en su módulo correspondiente.")
-    with st.form("nuevo_ingreso", clear_on_submit=False):
-        a, b, c = st.columns(3)
-        lote_nro = a.text_input("Número de lote *")
-        planta = b.selectbox("Planta receptora", PLANTAS)
-        procedencia = c.selectbox("Procedencia", ["CDG", "San Fernando", "Santa Elena", "Otros"])
-        a, b, c = st.columns(3)
-        granja = a.text_input("Granja de origen")
-        descripcion = b.selectbox("Tipo de huevo", DESCRIPCIONES)
-        genetica = c.selectbox("Genética", GENETICAS)
-        a, b, c, d = st.columns(4)
-        edad_repro = a.number_input("Edad reproductoras (semanas)", min_value=0, max_value=120, value=0)
-        cantidad = b.number_input("Huevos recibidos *", min_value=1, step=1, value=1)
-        postura = c.date_input("Fecha postura", value=ahora().date())
-        llegada = d.date_input("Fecha recepción", value=ahora().date())
-        hora_llegada = st.time_input("Hora recepción", value=ahora().time().replace(second=0, microsecond=0))
-        observaciones = st.text_area("Observaciones sanitarias / recepción", height=90)
-        st.caption(f"ID de operación: {clave_borrador('ingreso', 'LOT')}")
-        enviar = st.form_submit_button("Guardar recepción", type="primary")
-    if enviar:
+
+def presentar_existencias(registros, inv, corte):
+    render_header("Existencias y saldos", "Consulta por recepción, lote, fecha de postura y clase OK / R / RR.", corte)
+    c1,c2,c3 = st.columns(3)
+    lotes = sorted({r["lote"] for r in inv})
+    lote = c1.selectbox("Lote reproductora", ["Todos"]+lotes, key="filter_lot")
+    tipo = c2.selectbox("Clase HI", ["Todas", *TIPOS_HI], key="filter_class")
+    solo = c3.toggle("Solo saldos positivos", value=True)
+    datos = [r for r in inv if (lote == "Todos" or r["lote"] == lote) and
+             (tipo == "Todas" or r["tipo_hi"] == tipo) and (not solo or r["saldo_hi"] > 0)]
+    t1,t2,t3 = st.tabs(["Por recepción", "Por lote", "Por postura"])
+    with t1:
+        tabla(tabla_operativa(sorted(datos, key=lambda r:(r["dias_restantes"] if r["dias_restantes"] is not None else 999,
+                                                             r["fecha_postura"]))), 560)
+    with t2:
+        if datos:
+            df = pd.DataFrame(datos)
+            agg = df.pivot_table(index="lote", columns="tipo_hi", values="saldo_hi", aggfunc="sum", fill_value=0)
+            agg = agg.reindex(columns=list(TIPOS_HI), fill_value=0)
+            agg["TOTAL HI"] = agg.sum(axis=1)
+            agg["Cajas"] = agg["TOTAL HI"].clip(lower=0) // HI_POR_CAJA
+            agg["Adicionales"] = agg["TOTAL HI"].clip(lower=0) % HI_POR_CAJA
+            tabla(agg.reset_index().rename(columns={"lote":"Lote"}).sort_values("TOTAL HI", ascending=False), 470)
+        else: st.info("Sin datos.")
+    with t3:
+        if datos:
+            df = pd.DataFrame(datos)
+            agg = df.pivot_table(index=["lote", "fecha_postura"], columns="tipo_hi", values="saldo_hi", aggfunc="sum", fill_value=0)
+            agg = agg.reindex(columns=list(TIPOS_HI), fill_value=0)
+            agg["TOTAL HI"] = agg.sum(axis=1)
+            tabla(agg.reset_index().rename(columns={"lote":"Lote", "fecha_postura":"Postura"}), 470)
+        else: st.info("Sin datos.")
+    st.download_button("Exportar existencias filtradas (CSV)", csv_bytes(datos), file_name="HI_Pucacaca_Existencias.csv", mime="text/csv")
+    st.caption("Las cajas equivalentes de cada recepción se calculan individualmente; al consolidar se convierten los HI totales a cajas de 360, sin redondear remanentes por separado.")
+
+
+def presentar_cargas(registros, inv, corte):
+    render_header("Carga por incubadora", "Consumo de almacén por máquina, documento y recepciones de origen.", corte)
+    st.info("Una carga puede usar varias recepciones. Todas quedan vinculadas a una misma operación y a una incubadora. No registre aquí el traslado posterior a nacedora.")
+    hoy = date.today()
+    f = st.date_input("Fecha operativa de carga", value=hoy, max_value=hoy, key="fecha_carga")
+    inventario_fecha = inventario(registros["recepciones"], registros["movimientos"], f)
+    items = selector_cantidades(inventario_fecha, "cargas")
+    a,b,c = st.columns(3)
+    maquina = a.text_input("Incubadora *", placeholder="Ej.: INC-01")
+    doc = b.text_input("Orden / documento de carga *", placeholder="Ej.: CARG-2026-001")
+    resp = c.text_input("Responsable *", value=st.session_state.get("operador", ""), key="carga_resp")
+    obs = st.text_area("Observaciones de la carga", key="carga_obs", height=75)
+    confirmado = st.checkbox("Verifiqué máquina, documento, cantidades y saldos", key="carga_confirm")
+    suma = sum(x["cantidad_hi"] for x in items)
+    if st.button(f"Confirmar carga de {num_format(suma)} HI", type="primary", disabled=suma<=0, use_container_width=True):
         try:
-            identificador = clave_borrador("ingreso", "LOT")
-            guardar_ingreso({
-                "id_lote": identificador, "lote_nro": lote_nro, "planta": planta,
-                "procedencia": procedencia, "granja": granja, "descripcion": descripcion,
-                "genetica": genetica, "edad_repro": int(edad_repro), "cantidad": int(cantidad),
-                "fecha_postura": postura, "fecha_llegada": llegada, "hora_llegada": hora_llegada,
-                "observaciones": observaciones,
-            }, responsable)
-            nuevo_borrador("ingreso", "LOT")
-            exito_y_recargar("Recepción registrada con trazabilidad inicial.")
-        except Exception as error:
-            st.error(f"No se pudo guardar: {error}. Conserva el ID del borrador y vuelve a intentar si hubo un corte de conexión.")
-    st.info("Cada llegada es una unidad de inventario única, incluso cuando comparte el mismo número de lote productivo con otras recepciones.")
+            if not confirmado: raise ValueError("Marque la confirmación operativa.")
+            if not all((maquina.strip(), doc.strip(), resp.strip())):
+                raise ValueError("Incubadora, documento y responsable son obligatorios.")
+            draft = st.session_state.setdefault("draft_operacion_carga", new_id("OP"))
+            filas = construir_movimientos("CARGA", items, f, doc, resp, obs, incubadora=maquina, operacion=draft)
+            registrar_operacion(filas, f)
+            st.session_state.pop("draft_operacion_carga", None)
+            flash(f"Carga confirmada: {num_format(suma)} HI en {maquina}.")
+        except Exception as exc: st.error(str(exc))
+    st.divider()
+    st.subheader("Cargas registradas por incubadora")
+    cargos = [m for m in registros["movimientos"] if plain(m.get("tipo")) == "CARGA"]
+    if cargos:
+        df = pd.DataFrame(cargos)
+        df["incubadora"] = df["incubadora"].replace("", "Sin identificar (histórico)")
+        agrupado = df.groupby(["fecha_movimiento", "incubadora", "documento"], as_index=False)["cantidad_hi"].agg(lambda col: sum(i_num(x) for x in col))
+        tabla(agrupado.rename(columns={"fecha_movimiento":"Fecha", "incubadora":"Incubadora", "documento":"Documento", "cantidad_hi":"HI cargados"}), 360)
+    else: st.info("Sin cargas registradas.")
 
-elif menu == "Traslados entre plantas":
-    titulo("Traslados entre plantas", "Dos pasos separados: despacho desde origen y recepción física confirmada en destino.")
-    tab_envio, tab_recep, tab_segui = st.tabs(["1 · Despachar", "2 · Confirmar recepción", "3 · Seguimiento"])
-    with tab_envio:
-        disponibles = lotes[lotes["saldo"] > 0].copy()
-        if disponibles.empty:
-            st.info("No hay stock disponible para despachar. Registra un ingreso o importa los saldos iniciales.")
-        else:
-            elegido = elegir_lote(disponibles, "lote_traslado")
-            if elegido is not None:
-                st.caption(f"Origen: {elegido['planta']} · Saldo actual: {elegido['saldo']:,} huevos · Lote raíz: {elegido['id_raiz']}")
-                with st.form("form_traslado"):
-                    destinos = [p for p in PLANTAS if p != elegido["planta"]]
-                    destino = st.selectbox("Planta destino", destinos)
-                    a, b, c = st.columns(3)
-                    cantidad_env = a.number_input("Cantidad a despachar", min_value=1, max_value=max(1, int(elegido["saldo"])), value=1)
-                    fecha_env = b.date_input("Fecha salida", value=ahora().date())
-                    hora_env = c.time_input("Hora salida", value=ahora().time().replace(second=0, microsecond=0))
-                    a, b, c = st.columns(3)
-                    guia = a.text_input("Guía / documento")
-                    transporte = b.text_input("Transportista")
-                    placa = c.text_input("Placa del vehículo")
-                    a, b = st.columns(2)
-                    logtag = a.text_input("Código LogTag")
-                    temp_sal = b.number_input("Temperatura salida °C (referencial)", value=0.0, step=0.1, help="Si no hay medición, dejar en cero; no se interpreta como 0 °C.")
-                    nota = st.text_area("Observaciones del traslado", height=80)
-                    st.caption(f"ID de envío: {clave_borrador('traslado', 'TRF')}")
-                    ejecutar_env = st.form_submit_button("Confirmar despacho", type="primary")
-                if ejecutar_env:
+
+def presentar_transferencias(registros, inv, corte):
+    render_header("Transferencias a Tarapoto", "Salidas documentadas de Pucacaca. La recepción en destino se confirma por separado.", corte)
+    hoy = date.today()
+    f = st.date_input("Fecha de despacho", value=hoy, max_value=hoy, key="f_transf")
+    inv_fecha = inventario(registros["recepciones"], registros["movimientos"], f)
+    items = selector_cantidades(inv_fecha, "transferencia")
+    a,b,c = st.columns(3)
+    st.text_input("Planta destino", value=DESTINO, disabled=True)
+    documento = a.text_input("Guía de remisión *", key="tr_documento")
+    responsable = b.text_input("Responsable despacho *", value=st.session_state.get("operador", ""), key="tr_responsable")
+    transportista = c.text_input("Transportista / conductor", key="tr_transportista")
+    a,b = st.columns(2)
+    placa = a.text_input("Placa de vehículo", key="tr_placa")
+    logtag = b.text_input("Código LogTag / registrador", key="tr_logtag")
+    obs = st.text_area("Observación de traslado", key="tr_obs", height=70)
+    confirmar = st.checkbox("Confirmo las cantidades entregadas al transporte", key="tr_ok")
+    suma = sum(x["cantidad_hi"] for x in items)
+    if st.button(f"Despachar {num_format(suma)} HI a Tarapoto", type="primary", disabled=suma<=0, use_container_width=True):
+        try:
+            if not confirmar: raise ValueError("Confirme la entrega física al transporte.")
+            if not documento.strip() or not responsable.strip():
+                raise ValueError("Guía de remisión y responsable son obligatorios.")
+            draft = st.session_state.setdefault("draft_operacion_transf", new_id("OP"))
+            filas = construir_movimientos("TRANSFERENCIA", items, f, documento, responsable, obs,
+                                          destino=DESTINO, transportista=transportista, placa=placa, logtag=logtag,
+                                          operacion=draft)
+            registrar_operacion(filas, f)
+            st.session_state.pop("draft_operacion_transf", None)
+            flash(f"Transferencia despachada: {num_format(suma)} HI a P.I. Tarapoto.")
+        except Exception as exc: st.error(str(exc))
+    st.divider()
+    st.subheader("Despachos y confirmaciones en Tarapoto")
+    transfers = [m for m in registros["movimientos"] if plain(m.get("tipo")) == "TRANSFERENCIA"]
+    groups = collections.defaultdict(list)
+    for m in transfers: groups[plain(m.get("id_operacion"))].append(m)
+    confs = collections.defaultdict(list)
+    for c in registros["confirmaciones"]: confs[plain(c.get("id_operacion"))].append(c)
+    vista = []
+    for id_op, rows in groups.items():
+        total = sum(i_num(r.get("cantidad_hi")) for r in rows)
+        aceptados = sum(i_num(c.get("recibidos_hi")) for c in confs[id_op])
+        rechazados = sum(i_num(c.get("rechazados_hi")) for c in confs[id_op])
+        faltantes = sum(i_num(c.get("faltantes_hi")) for c in confs[id_op])
+        conciliado = aceptados + rechazados + faltantes
+        vista.append({"ID operación":id_op, "Fecha":rows[0].get("fecha_movimiento", ""),
+            "Guía":rows[0].get("documento", ""), "Despachados HI":total,
+            "Recibidos HI":aceptados, "Rechazados HI":rechazados, "Faltantes HI":faltantes,
+            "Por conciliar":total-conciliado, "Estado":"Conciliado" if conciliado == total else "Pendiente"})
+    tabla(vista, 350)
+    if groups:
+        with st.expander("Confirmar llegada informada por Tarapoto"):
+            opciones_ops = [v["ID operación"] for v in vista if v["Por conciliar"] > 0]
+            if opciones_ops:
+                op = st.selectbox("Despacho pendiente", opciones_ops,
+                                  format_func=lambda x: f"{x} · {next(v['Guía'] for v in vista if v['ID operación']==x)}")
+                pendiente = next(v["Por conciliar"] for v in vista if v["ID operación"] == op)
+                with st.form("confirmacion_tar"):
+                    fecha = st.date_input("Fecha de recepción informada", value=date.today(), max_value=date.today())
+                    a,b,c = st.columns(3)
+                    recibidos = a.number_input("HI conformes", min_value=0, max_value=pendiente, value=pendiente)
+                    rechazados = b.number_input("HI rechazados", min_value=0, max_value=pendiente, value=0)
+                    faltantes = c.number_input("HI faltantes", min_value=0, max_value=pendiente, value=0)
+                    documento = st.text_input("Documento de recepción *")
+                    responsable = st.text_input("Responsable que confirma *", value=st.session_state.get("operador", ""))
+                    obs = st.text_area("Observaciones", height=65)
+                    submit = st.form_submit_button("Registrar confirmación de destino", type="primary")
+                if submit:
                     try:
-                        id_tra = clave_borrador("traslado", "TRF")
-                        guardar_traslado({
-                            "id_traslado": id_tra, "id_lote_origen": elegido["id_lote"],
-                            "id_lote_destino": f"REC-{id_tra}", "id_raiz": elegido["id_raiz"],
-                            "planta_origen": elegido["planta"], "planta_destino": destino,
-                            "cantidad_enviada": int(cantidad_env), "fecha_salida": fecha_env,
-                            "hora_salida": hora_env, "guia": guia.strip(), "transportista": transporte.strip(),
-                            "placa": placa.strip().upper(), "logtag": logtag.strip(),
-                            "temperatura_salida": "" if temp_sal == 0 else temp_sal,
-                            "observaciones": nota,
-                        }, responsable)
-                        nuevo_borrador("traslado", "TRF")
-                        exito_y_recargar("Despacho registrado: los huevos figuran en tránsito hasta confirmarse la recepción.")
-                    except Exception as error:
-                        st.error(f"No se pudo completar el despacho: {error}. No cambies el ID del borrador al reintentar.")
+                        if sum([recibidos,rechazados,faltantes]) <= 0 or sum([recibidos,rechazados,faltantes]) > pendiente:
+                            raise ValueError("Las cantidades deben conciliarse sin superar lo pendiente.")
+                        if not documento.strip() or not responsable.strip():
+                            raise ValueError("Documento y responsable obligatorios.")
+                        fresh = cargar_registros(fresco=True)
+                        all_sent = sum(i_num(m.get("cantidad_hi")) for m in fresh["movimientos"] if m.get("id_operacion") == op)
+                        all_confirmed = sum(i_num(x.get("recibidos_hi"))+i_num(x.get("rechazados_hi"))+i_num(x.get("faltantes_hi"))
+                                            for x in fresh["confirmaciones"] if x.get("id_operacion") == op)
+                        if sum([recibidos,rechazados,faltantes]) > all_sent - all_confirmed:
+                            raise ValueError("Otro usuario modificó el despacho; actualice la pantalla.")
+                        fila = dict(zip(CONFIRMACION, [new_id("CONF"), op, fecha.isoformat(),
+                              recibidos, rechazados, faltantes, documento.strip(), responsable.strip(), obs.strip(), timestamp()]))
+                        guardar_filas("confirmaciones", [fila]); flash("Confirmación de llegada registrada.")
+                    except Exception as exc: st.error(str(exc))
+            else: st.success("Todos los despachos están conciliados.")
+        st.caption("La confirmación en Tarapoto es un control documental de llegada; NO suma stock a Pucacaca.")
 
-    with tab_recep:
-        abiertos = traslados[traslados["estado"].isin(["EN TRANSITO", "RECEPCION PARCIAL"])].copy()
-        if abiertos.empty:
-            st.info("No hay traslados pendientes de recepción.")
-        else:
-            opciones = abiertos.set_index("id_traslado").to_dict("index")
-            id_actual = st.selectbox("Traslado pendiente", list(opciones), format_func=lambda k: f"{k} | {opciones[k]['planta_origen']} → {opciones[k]['planta_destino']} | {opciones[k]['pendiente']:,} pendientes")
-            x = opciones[id_actual]
-            st.caption(f"Lote {x['lote_nro']} · Enviado {entero(x['cantidad_enviada']):,} · Aceptado {entero(x['cantidad_aceptada']):,} · Pendiente {entero(x['pendiente']):,}")
-            with st.form("form_recepcion_traslado"):
-                a, b, c = st.columns(3)
-                fecha_rec = a.date_input("Fecha de llegada", value=ahora().date())
-                hora_rec = b.time_input("Hora llegada", value=ahora().time().replace(second=0, microsecond=0))
-                condicion = c.selectbox("Condición de recepción", ["Conforme", "Con observaciones", "No conforme"])
-                a, b, c = st.columns(3)
-                aceptada = a.number_input("Huevos aceptados", min_value=0, max_value=max(0, int(x["pendiente"])), value=int(x["pendiente"]))
-                rechazados = b.number_input("Huevos rechazados", min_value=0, max_value=max(0, int(x["pendiente"])), value=0)
-                faltantes = c.number_input("Huevos faltantes (cierre de diferencia)", min_value=0, max_value=max(0, int(x["pendiente"])), value=0)
-                temp_llegada = st.number_input("Temperatura llegada °C (referencial)", value=0.0, step=0.1)
-                obs_rec = st.text_area("Observaciones y explicación de diferencias", height=90)
-                st.caption(f"ID de confirmación: {clave_borrador('recepcion', 'RCP')}")
-                confirmar = st.form_submit_button("Confirmar recepción", type="primary")
-            if confirmar:
-                try:
-                    identificador = clave_borrador("recepcion", "RCP")
-                    guardar_recepcion_traslado({
-                        "id_recepcion": identificador, "id_traslado": id_actual,
-                        "fecha_recepcion": fecha_rec, "hora_recepcion": hora_rec,
-                        "aceptada": int(aceptada), "rechazada": int(rechazados),
-                        "faltante": int(faltantes), "condicion": condicion,
-                        "temperatura_llegada": "" if temp_llegada == 0 else temp_llegada,
-                        "observaciones": obs_rec,
-                    }, responsable)
-                    nuevo_borrador("recepcion", "RCP")
-                    exito_y_recargar("Llegada confirmada. Stock de destino actualizado y vinculado al origen.")
-                except Exception as error:
-                    st.error(f"No se pudo confirmar: {error}. Conserva el ID de confirmación para reintentar.")
-            st.caption("En una recepción parcial, registra únicamente lo efectivamente aceptado/rechazado. Los huevos restantes continúan en tránsito hasta el siguiente registro o cierre por faltante.")
 
-    with tab_segui:
-        if traslados.empty:
-            st.info("Aún no se han registrado despachos.")
-        else:
-            filtro = st.selectbox("Estado", ["TODOS"] + sorted(traslados["estado"].unique().tolist()))
-            vista = traslados if filtro == "TODOS" else traslados[traslados["estado"] == filtro]
-            tabla(vista[["id_traslado", "lote_nro", "planta_origen", "planta_destino", "cantidad_enviada", "cantidad_aceptada", "cantidad_rechazada", "cantidad_faltante", "pendiente", "estado", "fecha_envio", "guia", "logtag"]], 450)
-            st.download_button("Exportar seguimiento", excel_hojas({"Traslados": vista}), file_name="Traslados_IncubaTrack.xlsx")
-
-elif menu == "Salidas y ajustes":
-    titulo("Destinos y correcciones", "Registra cargas de incubadora, ventas, mermas y ajustes documentados sin modificar manualmente el saldo.")
-    disponibles = lotes[lotes["saldo"] > 0].copy()
-    elegir = elegir_lote(disponibles, "lote_salida")
-    if elegir is not None:
-        with st.form("form_salida"):
-            tipo_etiqueta = st.selectbox("Operación", ["Carga incubadora", "Venta", "Merma", "Ajuste negativo", "Ajuste positivo"])
-            tipo = {"Carga incubadora": "SALIDA_INCUBADORA", "Venta": "VENTA", "Merma": "MERMA", "Ajuste negativo": "AJUSTE_NEGATIVO", "Ajuste positivo": "AJUSTE_POSITIVO"}[tipo_etiqueta]
-            cantidad_sal = st.number_input("Cantidad", min_value=1, value=1, step=1)
-            ref = st.text_input("Incubadora / N° carga / documento de referencia", placeholder="Ej.: INC-04 / CARGA-2026-125")
-            obs = st.text_area("Justificación / observaciones", height=100)
-            st.caption(f"ID movimiento: {clave_borrador('salida', 'MOV')}")
-            guardar = st.form_submit_button("Registrar movimiento", type="primary")
-        if guardar:
-            try:
-                guardar_salida({"id_evento": clave_borrador("salida", "MOV"),
-                                "id_lote": elegir["id_lote"], "tipo": tipo,
-                                "cantidad": int(cantidad_sal), "referencia": ref, "observaciones": obs}, responsable)
-                nuevo_borrador("salida", "MOV")
-                exito_y_recargar("Movimiento registrado. El stock se recalculó desde los eventos.")
-            except Exception as error:
-                st.error(f"Error al registrar: {error}")
-        st.warning("Los ajustes no sustituyen una investigación de diferencias. No se permiten borrados de movimientos desde la interfaz.")
-
-elif menu == "Inventario":
-    titulo("Inventario por recepción", "Cada registro mantiene su planta, fecha de recepción, antigüedad desde postura y saldo calculado.")
-    activos = lotes[lotes["saldo"] > 0].copy()
-    a, b, c = st.columns(3)
-    filtro_planta = a.selectbox("Planta", ["TODAS"] + PLANTAS)
-    buscar = b.text_input("Buscar lote, granja o ID")
-    solo_alertas = c.checkbox(f"Solo huevos con más de {edad_alerta} días desde postura")
-    vista = activos.copy()
-    if filtro_planta != "TODAS":
-        vista = vista[vista["planta"] == filtro_planta]
-    if buscar:
-        patron = buscar.strip()
-        mascara = (vista["lote_nro"].astype(str).str.contains(patron, case=False, regex=False)
-                   | vista["id_lote"].astype(str).str.contains(patron, case=False, regex=False)
-                   | vista["granja"].astype(str).str.contains(patron, case=False, regex=False))
-        vista = vista[mascara]
-    if solo_alertas:
-        vista = vista[pd.to_numeric(vista["dias_postura"], errors="coerce") > edad_alerta]
-    vista["Estado edad"] = vista["dias_postura"].apply(
-        lambda d: "Sin fecha" if pd.isna(d) else "Alerta" if d > edad_alerta else "Observación" if d >= max(1, edad_alerta - 2) else "Dentro de umbral"
-    )
-    a, b, c = st.columns(3)
-    a.metric("Stock filtrado", f"{int(vista['saldo'].sum()):,}")
-    b.metric("Recepciones", len(vista))
-    valido = vista.dropna(subset=["dias_postura"])
-    peso = valido["saldo"].sum()
-    edad_media = round((valido["dias_postura"] * valido["saldo"]).sum() / peso, 1) if peso > 0 else 0
-    c.metric("Edad ponderada del huevo", f"{edad_media} días")
-    campos = ["id_lote", "lote_nro", "planta", "procedencia", "granja", "saldo", "fecha_postura", "fecha_llegada", "dias_postura", "dias_planta", "edad_repro", "Estado edad"]
-    tabla(vista[campos].sort_values("dias_postura", ascending=False, na_position="last"), 480)
-    st.caption("Edad desde postura ≠ días almacenados en la planta. Ambos valores se muestran por separado. El umbral debe validarse con los procedimientos técnicos de Incubación.")
-    st.download_button("Exportar inventario filtrado", excel_hojas({"Inventario": vista[campos]}), file_name="Inventario_IncubaTrack.xlsx")
-
-elif menu == "Trazabilidad":
-    titulo("Expediente de trazabilidad", "Consulta todo el recorrido de un lote productivo, incluyendo derivaciones y nuevas recepciones entre plantas.")
-    if lotes.empty:
-        st.info("Primero registra o importa lotes.")
-    else:
-        vista_raices = lotes.drop_duplicates("id_raiz").copy()
-        listado_raices = vista_raices.set_index("id_raiz").to_dict("index")
-        raiz = st.selectbox("Lote / recepción raíz", list(listado_raices), format_func=lambda x: f"{listado_raices[x]['lote_nro']} · {listado_raices[x]['procedencia']} · {x}")
-        familia = lotes[lotes["id_raiz"] == raiz].copy()
-        movimientos = eventos[eventos["id_raiz"] == raiz].sort_values("fecha_evento", ascending=True).copy()
-        rutas = traslados[traslados["id_raiz"] == raiz].copy()
-        detalle_rec = recepciones[recepciones["id_traslado"].isin(rutas["id_traslado"])].copy()
-        a, b, c, d = st.columns(4)
-        a.metric("Saldo actual de la familia", f"{int(familia['saldo'].sum()):,}")
-        b.metric("Recepciones vinculadas", len(familia))
-        c.metric("Plantas en el recorrido", int(familia["planta"].nunique()))
-        d.metric("Transferencias realizadas", len(rutas))
-        st.subheader("Árbol de recepciones")
-        def nivel(x):
-            actual = str(x["id_padre"])
-            visitados = {str(x["id_lote"])}
-            n = 0
-            dic = familia.set_index("id_lote")["id_padre"].to_dict()
-            while actual and actual not in visitados and n < 20:
-                n += 1
-                visitados.add(actual)
-                actual = str(dic.get(actual, ""))
-            return n
-        familia["Etapa"] = familia.apply(nivel, axis=1)
-        tabla(familia[["Etapa", "id_lote", "id_padre", "lote_nro", "planta", "fecha_llegada", "saldo", "origen_registro"]].sort_values(["Etapa", "fecha_llegada"]), 320)
-        st.subheader("Línea de tiempo de movimientos")
-        tabla(movimientos[["fecha_evento", "tipo", "planta", "planta_contraparte", "cantidad", "variacion", "referencia", "id_lote", "responsable"]], 400)
-        if not rutas.empty:
-            st.subheader("Rutas y conciliación entre plantas")
-            tabla(rutas[["id_traslado", "planta_origen", "planta_destino", "cantidad_enviada", "cantidad_aceptada", "cantidad_rechazada", "cantidad_faltante", "pendiente", "estado", "guia", "logtag"]], 320)
-        exportar = {"Lotes": familia, "Movimientos": movimientos, "Traslados": rutas, "Recepciones": detalle_rec}
+def presentar_ajustes(registros, inv, corte):
+    render_header("Bajas y ajustes", "Correcciones justificadas mediante movimientos trazables; nunca se edita el saldo manualmente.", corte)
+    tipo = st.selectbox("Operación", ["BAJA", "AJUSTE +", "AJUSTE -"])
+    f = st.date_input("Fecha de la operación", value=date.today(), max_value=date.today())
+    inv_fecha = inventario(registros["recepciones"], registros["movimientos"], f)
+    lista = inv_fecha if tipo == "AJUSTE +" else opciones(inv_fecha)
+    if not lista:
+        st.warning("No existen recepciones para operar.")
+        return
+    by_id = {r["id_recepcion"]: r for r in lista}
+    rid = st.selectbox("Recepción", list(by_id), format_func=lambda x: etiqueta(by_id[x]))
+    cantidad = st.number_input("Cantidad HI", min_value=1, step=1)
+    a,b = st.columns(2)
+    causa = a.selectbox("Causa / motivo *", ["Rotura", "Contaminación", "Diferencia inventario", "Error documental", "Otro"])
+    doc = b.text_input("Documento / acta *")
+    responsable = st.text_input("Responsable *", value=st.session_state.get("operador", ""), key="aj_responsable")
+    obs = st.text_area("Explicación detallada *", height=85)
+    confirmar = st.checkbox("Confirmo que la corrección cuenta con sustento documental")
+    if st.button("Registrar movimiento de ajuste", type="primary"):
         try:
-            historicos = pd.DataFrame(hoja("movimientos").get_all_records(default_blank=""))
-            if {"id_lote"}.issubset(historicos.columns):
-                historicos = historicos[historicos["id_lote"].astype(str).isin(familia["id_lote"].astype(str))]
-                if not historicos.empty:
-                    st.subheader("Antecedentes del sistema anterior")
-                    st.caption("Referencia histórica únicamente; no se suma al stock de IncubaTrack 2.0.")
-                    tabla(historicos, 220)
-                    exportar["Histórico anterior"] = historicos
-        except gspread.exceptions.WorksheetNotFound:
-            pass
-        st.download_button("Descargar expediente completo", excel_hojas(exportar), file_name=f"Trazabilidad_{raiz}.xlsx", type="primary")
+            if not confirmar or not doc.strip() or not obs.strip() or not responsable.strip():
+                raise ValueError("Documento, responsable, explicación y confirmación son obligatorios.")
+            draft = st.session_state.setdefault("draft_operacion_ajuste", new_id("OP"))
+            rows = construir_movimientos(tipo, [{"id_recepcion":rid, "cantidad_hi":int(cantidad)}], f, doc, responsable, obs, causa=causa, operacion=draft)
+            registrar_operacion(rows, f)
+            st.session_state.pop("draft_operacion_ajuste", None)
+            flash("Movimiento de ajuste registrado y vinculado a la recepción.")
+        except Exception as exc: st.error(str(exc))
 
-elif menu == "Auditoría y configuración":
-    titulo("Auditoría y configuración", "Revisa la consistencia entre envíos, recepciones y eventos; importa los saldos del sistema anterior sin modificarlo.")
-    incidencias = diagnosticos(lotes, eventos, traslados, recepciones)
-    a, b, c = st.columns(3)
-    a.metric("Incidencias de integridad", len(incidencias))
-    b.metric("Eventos registrados", len(eventos))
-    c.metric("Lotes / recepciones", len(lotes))
-    if incidencias.empty:
-        st.success("Sin incoherencias detectadas por los controles automatizados.")
-    else:
-        st.error("Se detectaron inconsistencias. Revisarlas antes de interpretar los KPIs.")
-        tabla(incidencias, 350)
 
-    with st.expander("Ver todos los eventos registrados"):
-        tabla(eventos.sort_values("fecha_evento", ascending=False), 460)
-    envios_incompletos = traslados[traslados["estado"] == "SIN DESPACHO"]
-    if not envios_incompletos.empty:
-        with st.expander("Recuperación de documentos de despacho incompletos", expanded=True):
-            st.warning("Estos documentos existen, pero no tienen evento de salida. Comprobar antes que el envío salió físicamente.")
-            ops_envio = envios_incompletos.set_index("id_traslado").to_dict("index")
-            referencia_envio = st.selectbox("Documento a recuperar", list(ops_envio))
-            confirmar_envio = st.checkbox("Confirmo físicamente el despacho y autorizo descontar el stock")
-            if st.button("Recuperar movimiento de despacho", disabled=not confirmar_envio):
-                try:
-                    reparar_despacho_desde_documento(envios_incompletos[envios_incompletos["id_traslado"] == referencia_envio].iloc[0], responsable)
-                    exito_y_recargar("Evento de despacho recuperado sin duplicarlo.")
-                except Exception as error:
-                    st.error(f"No se pudo recuperar: {error}")
-    con_error = eventos[(eventos["tipo"] == "RECEPCION_TRASLADO") &
-                         (~eventos["referencia"].astype(str).isin(recepciones["id_recepcion"].astype(str)))]
-    if not con_error.empty:
-        with st.expander("Recuperación de recepciones interrumpidas", expanded=True):
-            st.warning("Estas recepciones tienen entrada registrada, pero falta la confirmación. Revisa el documento físico antes de completarlas.")
-            ops = con_error.set_index("id_evento").to_dict("index")
-            oper = st.selectbox("Evento para completar", list(ops), key="recuperar_evento")
-            st.write(f"ID: {ops[oper]['referencia']} · Traslado: {ops[oper]['id_traslado']} · Aceptados: {ops[oper]['cantidad']:,}")
-            confirmar_recuperacion = st.checkbox("Confirmo que el evento coincide con la recepción física", key="recuperar_confirma")
-            if st.button("Completar confirmación desde evento", disabled=not confirmar_recuperacion):
-                try:
-                    reparar_recepcion_desde_evento(con_error[con_error["id_evento"] == oper].iloc[0])
-                    exito_y_recargar("Confirmación recuperada sin duplicar stock.")
-                except Exception as error:
-                    st.error(f"No se pudo recuperar: {error}")
-    with st.expander("Importar saldos actuales desde las hojas antiguas"):
-        st.warning("Realizar COPIA DE SEGURIDAD y detener la app anterior antes de importar. Esta operación es una fotografía de saldos actuales, no una reconstrucción retroactiva de movimientos.")
-        st.write("La aplicación conserva intactas **lotes** y **movimientos**. Solo agregará datos faltantes a las hojas nuevas.")
-        st.write("La migración se puede reintentar si se corta la conexión: comprueba los IDs antes de volver a escribir.")
-        confirmar = st.checkbox("Confirmo que tengo respaldo de la hoja antigua y que suspendí registros en la app anterior.")
-        if st.button("Importar / reanudar migración", disabled=not confirmar, type="primary"):
+def presentar_conciliacion(registros, inv, corte):
+    render_header("Conciliación física", "Contrasta el conteo físico con el saldo del sistema, sin ajustar automáticamente las existencias.", corte)
+    disponibles = opciones(inv)
+    if not disponibles:
+        st.info("No existen recepciones con saldo disponible.")
+        return
+    by_id = {r["id_recepcion"]:r for r in disponibles}
+    rid = st.selectbox("Recepción que se contó", list(by_id), format_func=lambda x: etiqueta(by_id[x]))
+    saldo = by_id[rid]["saldo_hi"]
+    a,b,c = st.columns(3)
+    a.metric("Saldo del sistema", num_format(saldo))
+    fecha = b.date_input("Fecha del conteo", value=corte, max_value=date.today())
+    fisico = c.number_input("Conteo físico HI", min_value=0, value=saldo, step=1)
+    diferencia = int(fisico) - saldo
+    if diferencia == 0: st.success("Conteo conforme: sin diferencias.")
+    else: st.warning(f"Diferencia: {diferencia:+,} HI. Esta conciliación NO modifica el stock.")
+    with st.form("conteo"):
+        documento = st.text_input("Acta / documento de conteo *")
+        responsable = st.text_input("Responsable del conteo *", value=st.session_state.get("operador", ""))
+        observ = st.text_area("Hallazgos / explicación", height=70)
+        confirmado = st.checkbox("Confirmo que el conteo fue efectuado físicamente")
+        ok = st.form_submit_button("Guardar acta de conteo", type="primary")
+    if ok:
+        try:
+            if not confirmado or not documento.strip() or not responsable.strip():
+                raise ValueError("Documento, responsable y confirmación son obligatorios.")
+            if fecha != corte:
+                raise ValueError("Seleccione el mismo día como fecha de corte y conteo para evitar comparaciones incorrectas.")
+            frescos = cargar_registros(fresco=True)
+            saldo_fresco = {x["id_recepcion"]:x["saldo_hi"] for x in inventario(frescos["recepciones"], frescos["movimientos"], corte)}.get(rid)
+            if saldo_fresco != saldo:
+                raise ValueError("El saldo cambió desde el inicio del conteo; refresque y repita la conciliación.")
+            fila = dict(zip(CONTEO, [new_id("CNT"), fecha.isoformat(), rid, saldo, int(fisico), diferencia,
+                                         documento.strip(), responsable.strip(), observ.strip(), timestamp()]))
+            guardar_filas("conteos", [fila]); flash("Acta de conciliación registrada. No se alteró el saldo contable.")
+        except Exception as exc: st.error(str(exc))
+    st.divider()
+    st.subheader("Últimos conteos")
+    tabla(registros["conteos"][-40:][::-1], 360)
+    st.caption("Para regularizar una diferencia autorizada, ingrese posteriormente a Bajas y ajustes con su acta de sustento.")
+
+
+def presentar_historial(registros, inv, corte):
+    render_header("Trazabilidad y auditoría", "Reconstruye la historia de cada recepción y todos los cambios del inventario.", corte)
+    tab1,tab2,tab3 = st.tabs(["Expediente de recepción", "Libro de movimientos", "Alertas de integridad"])
+    with tab1:
+        if not inv:
+            st.info("Aún no existen recepciones.")
+        else:
+            by_id = {r["id_recepcion"]: r for r in inv}
+            rid = st.selectbox("Seleccione una recepción", list(by_id), format_func=lambda x: etiqueta(by_id[x]))
+            r = by_id[rid]
+            a,b,c,d = st.columns(4)
+            a.metric("Saldo HI",num_format(r["saldo_hi"]))
+            b.metric("Ingreso HI",num_format(r["ingresos_hi"]))
+            c.metric("Lote",r["lote"])
+            d.metric("Tipo",r["tipo_hi"])
+            st.caption(f"ID interno: {rid}  ·  Guía: {r['guia_recepcion']}  ·  Ubicación: {r['ubicacion']}  ·  Postura: {r['fecha_postura']}")
+            m = [x for x in registros["movimientos"] if plain(x.get("id_recepcion")) == rid]
+            origen = [{"Fecha":r["fecha_ingreso"], "Movimiento":"INGRESO", "Documento":r["guia_recepcion"],
+                       "Incubadora":"", "Variación HI":r["ingresos_hi"], "Responsable":r["responsable"]}]
+            origen.extend({"Fecha":x.get("fecha_movimiento", ""), "Movimiento":x.get("tipo", ""),
+                           "Documento":x.get("documento", ""), "Incubadora":x.get("incubadora", ""),
+                           "Variación HI":i_num(x.get("variacion_hi")), "Responsable":x.get("responsable", "")} for x in m)
+            tabla(sorted(origen, key=lambda x:x["Fecha"]), 380)
+    with tab2:
+        tipo = st.selectbox("Filtrar movimiento", ["Todos", *TIPOS_MOV])
+        ms = [x for x in registros["movimientos"] if tipo == "Todos" or x.get("tipo") == tipo]
+        tabla(ms[::-1], 520)
+        st.download_button("Exportar libro de movimientos (CSV)", csv_bytes(ms),
+                           file_name="HI_Pucacaca_Movimientos.csv", mime="text/csv")
+    with tab3:
+        alertas = incidencias(registros, inv)
+        if not alertas: st.success("No se detectaron incidencias en los controles automáticos disponibles.")
+        else: tabla(alertas, 460)
+        st.caption("Los códigos de recepción duplicados en el Excel se mantienen por separado; las cargas históricas sin incubadora no se completan artificialmente.")
+
+
+def presentar_importacion(registros, inv, corte, reglas):
+    render_header("Importación y parámetros", "Previsualiza el Excel recibido y migra únicamente a hojas nuevas, sin alterar los datos originales.", corte)
+    t1,t2,t3 = st.tabs(["Importar Excel", "Reglas del control", "Estado de conexión"])
+    with t1:
+        st.markdown("**Compatible con las hojas `Existencias` y `Movimientos` del archivo recibido.** Conserva las clases OK/R/RR, sus cantidades y sus guías.")
+        f = st.file_uploader("Seleccionar Control Almacen de HI DonPollo.xlsx", type=["xlsx"], key="excel_ingreso")
+        if f is not None:
             try:
-                with st.spinner("Importando registros existentes..."):
-                    n_lotes, n_saldos = migrar_desde_legacy(responsable)
-                exito_y_recargar(f"Importación terminada: {n_lotes} lotes nuevos y {n_saldos} saldos iniciales agregados.")
-            except Exception as error:
-                st.error(f"No se pudo completar la importación: {error}")
+                contenido = f.getvalue()
+                if len(contenido) > 12_000_000:
+                    raise ValueError("Archivo demasiado grande (>12 MB) para esta importación.")
+                parsed = preparar_importacion_excel(contenido)
+                r,m = parsed["recepciones"],parsed["movimientos"]
+                a,b,c,d = st.columns(4)
+                a.metric("Recepciones a evaluar", len(r));b.metric("Movimientos a evaluar",len(m))
+                c.metric("HI ingresados",num_format(sum(x["cantidad_hi"] for x in r)))
+                d.metric("HI movimientos",num_format(sum(x["cantidad_hi"] for x in m)))
+                st.caption(f"Identificador de archivo: {parsed['importacion_id']}")
+                for codigo,n in parsed["duplicados"].items():
+                    st.warning(f"Código histórico duplicado {codigo}: {n} recepciones. Se crearán IDs internos individuales; no se fusionarán cantidades.")
+                for nota in parsed["pendientes"][:25]: st.error(nota)
+                if len(parsed["pendientes"])>25: st.warning("Existen más incidencias; revisar el archivo.")
+                saldo_calc = sum(x["cantidad_hi"] for x in r) + sum(x["variacion_hi"] for x in m)
+                st.info(f"Saldo proyectado con este archivo, antes de sumar operaciones posteriores: {num_format(saldo_calc)} HI.")
+                with st.expander("Ver muestra de recepciones"):
+                    tabla(r[:12], 400)
+                actuales_ids = {plain(x.get("id_recepcion")) for x in registros["recepciones"]}
+                faltan = sum(x["id_recepcion"] not in actuales_ids for x in r)
+                st.caption(f"Recepciones nuevas en destino: {faltan}. La importación es reintentable y no duplica las filas del mismo archivo.")
+                st.warning("Si ya hay movimientos en el sistema, antes de importar un saldo histórico adicional confirme que no representan las mismas existencias.")
+                confirmar = st.checkbox("Confirmo que validé el corte y que este archivo no duplica inventario ya registrado", key="confirmar_import")
+                if st.button("Importar después de verificar", type="primary", disabled=not confirmar):
+                    resultado = migrar_archivo(parsed)
+                    flash(f"Importación terminada: {resultado['recepciones']} recepciones y {resultado['movimientos']} movimientos nuevos.")
+            except Exception as exc:
+                st.error(f"No se pudo preparar o importar el Excel: {exc}")
+        else:
+            st.info("Sube el archivo Excel para revisar sus datos y comenzar una prueba en modo demostración, o importarlo a las hojas nuevas de Google Sheets.")
+    with t2:
+        st.subheader("Parámetros que deben validar Operaciones e Incubación")
+        st.markdown(f"- Huevos por caja: **{HI_POR_CAJA} HI** (según el Excel).  ")
+        st.markdown(f"- Reproductoras menores de 50 semanas: **{reglas[0]} días**.  ")
+        st.markdown(f"- Reproductoras de 50–59 semanas: **{reglas[1]} días**.  ")
+        st.markdown(f"- Reproductoras desde 60 semanas: **{reglas[2]} días**.  ")
+        st.warning("Estas referencias de almacenamiento son ejemplos del Excel: no representan estándares aprobados. Pueden ajustarse desde el menú lateral para análisis exploratorio.")
+        st.caption("Fecha de postura = día 0. La antigüedad incluye tiempo en granja, transporte y planta. El saldo se calcula al corte seleccionado.")
+    with t3:
+        st.metric("Modo de persistencia", "Google Sheets" if tiene_secrets() else "Demo temporal")
+        if tiene_secrets():
+            st.success("Las nuevas operaciones se guardan en hojas separadas de Google Sheets.")
+        else:
+            st.warning("Sin credenciales: los registros de esta sesión solo viven en la memoria de la aplicación. Se perderán al reiniciar o cerrar la sesión.")
+        tabla([{"Hoja nueva":k, "N.º de campos":len(v)} for k,v in SHEETS.items()], 250)
+        st.caption("Las hojas anteriores `lotes`, `movimientos` y las hojas `traz_*` de IncubaTrack 2.0 no se modifican.")
+        st.error("Límite operativo: Google Sheets no ofrece transacciones ni bloqueo concurrente. Para alta concurrencia se requiere base de datos transaccional y autenticación por usuario.")
 
-    st.subheader("Paquete de auditoría")
-    st.download_button("Exportar libro completo", excel_hojas({
-        "Inventario": lotes, "Eventos": eventos, "Traslados": traslados,
-        "Recepciones": recepciones, "Alertas": incidencias,
-    }), file_name=f"Auditoria_IncubaTrack_{ahora():%Y%m%d}.xlsx", type="primary")
-    st.info("Limitación: Google Sheets carece de transacciones multihoja, bloqueo distribuido y autenticación de usuario en esta app. Para operación simultánea crítica, usar base transaccional y acceso por roles.")
 
-st.divider()
-st.caption("IncubaTrack 2.0 · Control de Gestión · Registro de movimientos trazables entre plantas")
+def main():
+    st.set_page_config(page_title="IncubaTrack | Almacén HI Pucacaca", page_icon="🥚", layout="wide", initial_sidebar_state="expanded")
+    st.markdown(STYLE, unsafe_allow_html=True)
+    if tiene_secrets():
+        try:
+            preparar_google()
+        except Exception as exc:
+            st.error(f"No se pudo acceder al archivo Google Sheets: {exc}")
+            st.stop()
+    with st.sidebar:
+        st.markdown('<div class="it-brand"><strong>INCUBATRACK <span style="color:#df6b22;display:inline;font-size:1rem">HI</span></strong><span>P.I. Pucacaca · Gestión de almacén</span></div>',unsafe_allow_html=True)
+        if tiene_secrets():
+            st.caption("Datos persistentes · Google Sheets")
+        else:
+            st.warning("Modo demo · sin almacenamiento permanente", icon="⚠️")
+        st.markdown('<span class="it-overline">Navegación</span>', unsafe_allow_html=True)
+        paginas = ["Centro de control", "Recepciones HI", "Existencias y saldos", "Carga por incubadora",
+                    "Transferencias a Tarapoto", "Bajas y ajustes", "Conciliación física",
+                    "Trazabilidad y auditoría", "Importar Excel y parámetros"]
+        pagina = st.radio("Páginas", paginas, label_visibility="collapsed")
+        st.divider()
+        st.markdown('<span class="it-overline">Contexto de análisis</span>',unsafe_allow_html=True)
+        corte = st.date_input("Fecha de corte", value=date.today(), max_value=date.today(), key="corte_global")
+        operador = st.text_input("Operador / responsable", key="operador", placeholder="Nombre para prellenar registros")
+        with st.expander("Objetivos (provisionales)"):
+            dias1 = st.number_input("<50 semanas (días)", min_value=1, max_value=30, value=7, key="d_7")
+            dias2 = st.number_input("50–59 semanas (días)", min_value=1, max_value=30, value=5, key="d_5")
+            dias3 = st.number_input("≥60 semanas (días)", min_value=1, max_value=30, value=3, key="d_3")
+        st.markdown('<div class="it-note">Fuente: movimientos y recepciones. Un único saldo calculado, sin ediciones directas.<br>Control de Gestión · Don Pollo</div>', unsafe_allow_html=True)
+    try:
+        registros = cargar_registros()
+        reglas = (int(dias1),int(dias2),int(dias3))
+        inv = inventario(registros["recepciones"],registros["movimientos"],corte,reglas)
+        if st.session_state.get("flash"):
+            st.toast(st.session_state.pop("flash"))
+        if pagina == paginas[0]: presentar_dashboard(registros, inv, corte, reglas)
+        elif pagina == paginas[1]: presentar_recepciones(registros, inv, corte)
+        elif pagina == paginas[2]: presentar_existencias(registros, inv, corte)
+        elif pagina == paginas[3]: presentar_cargas(registros, inv, corte)
+        elif pagina == paginas[4]: presentar_transferencias(registros, inv, corte)
+        elif pagina == paginas[5]: presentar_ajustes(registros, inv, corte)
+        elif pagina == paginas[6]: presentar_conciliacion(registros, inv, corte)
+        elif pagina == paginas[7]: presentar_historial(registros, inv, corte)
+        else: presentar_importacion(registros, inv, corte, reglas)
+    except Exception as exc:
+        st.error(f"No fue posible cargar la operación: {exc}")
+        st.exception(exc)
+    st.markdown('<p class="it-note" style="margin-top:26px;text-align:center">IncubaTrack · Inventario HI · P.I. Pucacaca · Control de Gestión</p>',unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    main()
